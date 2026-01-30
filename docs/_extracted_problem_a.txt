@@ -1,0 +1,87 @@
+PAGES: 3
+
+==================== PAGE 1 ====================
+| ©2026 by COMAP | www.comap.org | www.mathmodels.org | info@comap.org |
+2026年MCM
+问题A：智能手机电池耗电建模
+智能手机是现代生活中不可或缺的工具，但其电池行为常显得不可预测。有些天，
+手机可能持续使用一整天；而在其他日子，电池却会在午饭前迅速耗尽。虽然一些
+用户将此归因于“重度使用”，但电池耗电的真正驱动因素更加复杂。功率消耗取决
+于屏幕尺寸和亮度、处理器负载、网络活动以及即使设备看似闲置时仍持续耗电的后
+台应用程序之间的相互作用。环境条件如温度进一步增加复杂性：某些电池在低温环境
+下有效容量下降，且在持续高负载下可能过热。电池的行为还受其使用历史及充电方式
+的影响。
+您的任务是开发一个连续时间数学模型，描述智能手机电池的荷电状态（SOC）随时
+间变化，在现实使用条件下进行建模。该模型将用于预测不同条件下的剩余至空时间
+。 您应假设手机配备锂离子电池。
+要求：
+1. 连续时间模型：开发一个使用连续时间方程或方程组表示电池荷电状态的模型
+。您可先从最简洁合理的电池耗电描述开始，随后扩展以涵盖屏幕使用、
+处理器负载、网络连接、GPS使用及其他后台任务等额外因素。
+数据作为支持，而非替代：可采集或使用数据进行参数估计与验证。若公开数
+据集有限，可采用已发布的测量数据或规格说明（需适当引用），前提是参
+数明确说明且已验证合理性。然而，单纯基于离散曲线拟合、时间步回归
+或无显式连续时间模型的黑箱机器学习项目，不符合本问题要求。所有使用数据
+必须有完整文档且可自由获取，且数据应在开放许可下免费使用。
+
+==================== PAGE 2 ====================
+| ©2026 by COMAP | www.comap.org | www.mathmodels.org | info@comap.org |
+2. 空电时间预测：应用模型计算或近似各种初始电量及使用情景下的空电时间。将
+预测结果与观察到的或合理的行为进行比较，量化不确定性，并识别模型表现
+良好或不佳的方面。
+○ 阐明您的模型如何解释这些结果的差异，并确定每种情况下导致电池快
+速耗电的具体驱动因素。
+○ 哪些活动或条件导致电池寿命显著缩短？
+哪些因素对模型的影响出乎意料地较小？
+3. 敏感性与假设：分析在调整建模假设、参数值及使用模式波动后，预测结果的变化
+情况。
+4. 建议：将您的研究结果转化为对手机用户的实用建议。例如，哪些用户行为
+——如降低屏幕亮度、关闭后台任务或切换网络模式——能带来最大幅度
+的电池续航提升？操作系统如何基于您的模型洞察实施更有效的省电
+策略？考虑电池老化导致有效容量下降，或探讨您的建模框架如何推广至其他便
+携式设备。
+您的报告应包括：
+●
+对模型及其控制方程的清晰描述。
+●
+设计选择背后的假设及其理由。
+●
+参数估计方法与验证结果。
+●
+优势、局限性及可能的扩展讨论。
+●
+突出主要结果、见解与建议的执行摘要。
+重要：您的模型必须基于明确界定的物理或机械原理；
+与电池行为明确连续时间描述脱节的离散曲线拟合或其他数学形式将不符合要求
+。仅依赖离散曲线拟合或统计回归且未明确构建连续时间模型的项目将不符合本问题
+的要求。
+您的PDF解答总页数不得超过25页，应包括：
+•
+一页摘要表。
+•
+目录。
+•
+完整解答。
+•
+文内引用及参考文献列表。
+•
+AI使用报告（如使用，不计入25页限制）
+
+==================== PAGE 3 ====================
+| ©2026 by COMAP | www.comap.org | www.mathmodels.org | info@comap.org |
+注意：完整的MCM提交无具体最低页数要求。您可使用最多25页，涵盖所有解答内容及
+任何附加信息（例如：图纸、图表、计算、表格）。 部分解决方案被接受。
+We permit the careful use of AI such as ChatGPT, although it is not necessary to create a
+solution to this problem. If you choose to utilize a generative AI, you must follow the COMAP
+AI use policy. This will result in an additional AI use report that you must add to the end of your
+PDF solution file and does not count toward the 25 total page limit for your solution.
+Glossary
+Smartphone: is a mobile device that combines the functionality of a traditional cell phone with
+advanced computing capabilities.
+Power Consumption: the rate at which a device uses electrical energy from its battery or power
+source.
+Processor Load: the actual amount of work being done by the processor at a given moment.
+State of Charge (SOC): a measure of how much energy remains in a battery compared to its full
+capacity, expressed as a percentage.
+Time-to-Empty: the estimated amount of time remaining before a battery is completely
+discharged.

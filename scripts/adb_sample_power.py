@@ -81,6 +81,22 @@ _BATT_KV = {
 }
 
 
+@dataclass
+class BatteryPropertiesReading:
+    current_now_uA: int | None
+    current_average_uA: int | None
+    energy_counter: int | None
+    charge_counter_uAh: int | None
+
+
+_BPROPS_KV = {
+    "current_now": re.compile(r"^\s*current_now:\s*([-]?\d+)\s*$", re.MULTILINE),
+    "current_average": re.compile(r"^\s*current_average:\s*([-]?\d+)\s*$", re.MULTILINE),
+    "energy_counter": re.compile(r"^\s*energy_counter:\s*([-]?\d+)\s*$", re.MULTILINE),
+    "charge_counter": re.compile(r"^\s*Charge counter:\s*(\d+)\s*$", re.MULTILINE),
+}
+
+
 def _parse_int(regex: re.Pattern[str], text: str) -> int | None:
     m = regex.search(text)
     if not m:
@@ -187,6 +203,25 @@ def _read_battery(adb: str, serial: str | None, timeout_s: float, auto_reset: bo
         temp_deci_c=_parse_int(_BATT_KV["temperature"], out),
         charge_counter_uah=_parse_int(_BATT_KV["charge_counter"], out),
         raw_updates_stopped=updates_stopped,
+    )
+
+
+def _read_batteryproperties(adb: str, serial: str | None, timeout_s: float) -> BatteryPropertiesReading:
+    """Best-effort higher-frequency battery properties via `dumpsys batteryproperties`.
+
+    On many devices this exposes instantaneous current (uA) which avoids the heavy
+    quantization seen in charge_counter updates.
+    """
+    base = ["-s", serial] if serial else []
+    rc, out, err = _run(adb, [*base, "shell", "dumpsys", "batteryproperties"], timeout_s=timeout_s)
+    if rc != 0:
+        raise RuntimeError(f"dumpsys batteryproperties failed: {err.strip()}")
+
+    return BatteryPropertiesReading(
+        current_now_uA=_parse_int(_BPROPS_KV["current_now"], out),
+        current_average_uA=_parse_int(_BPROPS_KV["current_average"], out),
+        energy_counter=_parse_int(_BPROPS_KV["energy_counter"], out),
+        charge_counter_uAh=_parse_int(_BPROPS_KV["charge_counter"], out),
     )
 
 
@@ -341,6 +376,11 @@ def main() -> int:
     parser.add_argument("--thermal", action="store_true", help="Also sample dumpsys thermalservice")
     parser.add_argument("--display", action="store_true", help="Also sample dumpsys power display state")
     parser.add_argument(
+        "--batteryproperties",
+        action="store_true",
+        help="Also sample dumpsys batteryproperties (current_now/current_average/energy_counter if available)",
+    )
+    parser.add_argument(
         "--thermal-names",
         default="BATTERY,SKIN,SOC,CPU,GPU,NPU,TPU,POWER_AMPLIFIER",
         help="Comma-separated thermal sensor names to extract when --thermal is enabled",
@@ -413,6 +453,16 @@ def main() -> int:
         "adb_error",
     ]
 
+    if args.batteryproperties:
+        fixed_cols.extend(
+            [
+                "batteryproperties_current_now_uA",
+                "batteryproperties_current_average_uA",
+                "batteryproperties_energy_counter",
+                "batteryproperties_charge_counter_uAh",
+            ]
+        )
+
     if args.display:
         fixed_cols.append("display_state")
 
@@ -452,6 +502,13 @@ def main() -> int:
                 row["battery_updates_stopped"] = int(batt.raw_updates_stopped)
 
                 row["brightness"] = _read_brightness(adb, args.serial, timeout_s=4.0)
+
+                if args.batteryproperties:
+                    bp = _read_batteryproperties(adb, args.serial, timeout_s=6.0)
+                    row["batteryproperties_current_now_uA"] = bp.current_now_uA
+                    row["batteryproperties_current_average_uA"] = bp.current_average_uA
+                    row["batteryproperties_energy_counter"] = bp.energy_counter
+                    row["batteryproperties_charge_counter_uAh"] = bp.charge_counter_uAh
 
                 if args.display:
                     row["display_state"] = _read_display_state(adb, args.serial, timeout_s=8.0) or ""

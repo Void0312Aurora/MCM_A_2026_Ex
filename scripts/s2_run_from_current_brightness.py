@@ -79,6 +79,11 @@ def main() -> int:
     p.add_argument("--interval", type=float, default=2.0)
     p.add_argument("--thermal", action="store_true")
     p.add_argument("--display", action="store_true", help="Also sample display state via dumpsys power")
+    p.add_argument(
+        "--batteryproperties",
+        action="store_true",
+        help="Also sample dumpsys batteryproperties (current_now/current_average if available)",
+    )
     p.add_argument("--auto-reset-battery", action="store_true")
     p.add_argument("--log-every", type=float, default=30.0)
     p.add_argument(
@@ -180,6 +185,8 @@ def main() -> int:
         cmd += ["--thermal"]
     if args.display:
         cmd += ["--display"]
+    if args.batteryproperties:
+        cmd += ["--batteryproperties"]
     if args.auto_reset_battery:
         cmd += ["--auto-reset-battery"]
 

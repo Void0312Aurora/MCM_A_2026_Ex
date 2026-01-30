@@ -35,6 +35,11 @@ def main() -> int:
     parser.add_argument("--interval", type=float, default=2.0)
     parser.add_argument("--thermal", action="store_true")
     parser.add_argument("--display", action="store_true", help="Also sample display state via dumpsys power")
+    parser.add_argument(
+        "--batteryproperties",
+        action="store_true",
+        help="Also sample dumpsys batteryproperties (current_now/current_average/energy_counter if available)",
+    )
     parser.add_argument("--auto-reset-battery", action="store_true")
     parser.add_argument("--log-every", type=float, default=60.0, help="Sampler progress log period seconds")
     parser.add_argument(
@@ -117,6 +122,8 @@ def main() -> int:
             sample_cmd += ["--thermal"]
         if args.display:
             sample_cmd += ["--display"]
+        if args.batteryproperties:
+            sample_cmd += ["--batteryproperties"]
         if args.auto_reset_battery:
             sample_cmd += ["--auto-reset-battery"]
 

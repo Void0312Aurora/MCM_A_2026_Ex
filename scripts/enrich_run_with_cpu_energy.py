@@ -76,9 +76,11 @@ def main() -> int:
 
     # Build policy->freq->mA lookups
     policy_lookup: dict[int, dict[int, float]] = {}
+    policy_freqs_sorted: dict[int, list[int]] = {}
     for policy, cluster in mapping.items():
         table = cluster_tables[cluster]
         policy_lookup[policy] = {f: ma for f, ma in zip(table.freqs_khz, table.current_ma)}
+        policy_freqs_sorted[policy] = sorted(table.freqs_khz)
 
     with args.run_csv.open("r", encoding="utf-8", newline="") as fin:
         reader = csv.DictReader(fin)
@@ -91,6 +93,9 @@ def main() -> int:
                 col = f"cpu_policy{policy}_{suffix}"
                 if col not in out_fields:
                     out_fields.append(col)
+            col = f"cpu_policy{policy}_unmatched_dt_ms"
+            if col not in out_fields:
+                out_fields.append(col)
         for col in ["cpu_energy_mJ_total", "battery_discharge_energy_mJ", "dt_s"]:
             if col not in out_fields:
                 out_fields.append(col)
@@ -126,10 +131,12 @@ def main() -> int:
 
                 for policy in sorted(mapping.keys()):
                     lookup = policy_lookup.get(policy, {})
+                    freqs_sorted = policy_freqs_sorted.get(policy, [])
 
                     matched_mw_ms = 0.0
                     unmatched_mw_ms = 0.0
                     sum_dt_ms = 0
+                    unmatched_dt_ms = 0
 
                     prefix = f"cpu_p{policy}_freq"
                     suffix = "_dt"
@@ -148,13 +155,28 @@ def main() -> int:
 
                         cur_ma = lookup.get(freq)
                         if cur_ma is None:
-                            # no mapping for this freq
+                            # Fallback: use nearest freq in the mapped cluster (keeps an energy estimate while
+                            # still accounting it as unmatched).
+                            if not freqs_sorted:
+                                unmatched_dt_ms += dt_ms
+                                continue
+                            nearest = min(freqs_sorted, key=lambda f: abs(f - freq))
+                            cur_ma = lookup.get(nearest)
+                            if cur_ma is None:
+                                unmatched_dt_ms += dt_ms
+                                continue
+                            if voltage_mv is None:
+                                unmatched_dt_ms += dt_ms
+                                continue
+                            power_mw = float(cur_ma) * float(voltage_mv) / 1000.0
+                            unmatched_mw_ms += power_mw * float(dt_ms)
                             continue
+
                         if voltage_mv is None:
+                            unmatched_dt_ms += dt_ms
                             continue
                         power_mw = float(cur_ma) * float(voltage_mv) / 1000.0
-                        mw_ms = power_mw * float(dt_ms)
-                        matched_mw_ms += mw_ms
+                        matched_mw_ms += power_mw * float(dt_ms)
 
                     energy_mJ = (matched_mw_ms + unmatched_mw_ms) / 1000.0
                     energy_mJ_matched = matched_mw_ms / 1000.0
@@ -164,10 +186,11 @@ def main() -> int:
                     row[f"cpu_policy{policy}_energy_mJ"] = f"{energy_mJ:.3f}" if voltage_mv is not None else ""
                     row[f"cpu_policy{policy}_energy_mJ_matched"] = f"{energy_mJ_matched:.3f}" if voltage_mv is not None else ""
                     row[f"cpu_policy{policy}_energy_mJ_unmatched"] = f"{energy_mJ_unmatched:.3f}" if voltage_mv is not None else ""
+                    row[f"cpu_policy{policy}_unmatched_dt_ms"] = str(unmatched_dt_ms)
 
                     # Average power over the actually-accounted time_in_state window
                     if sum_dt_ms > 0:
-                        avg_p = (energy_mJ * 1000.0) / (float(sum_dt_ms) / 1000.0)  # mW
+                        avg_p = (energy_mJ * 1000.0) / float(sum_dt_ms)  # mW
                         row[f"cpu_policy{policy}_avg_power_mW"] = f"{avg_p:.3f}" if voltage_mv is not None else ""
                     else:
                         row[f"cpu_policy{policy}_avg_power_mW"] = ""

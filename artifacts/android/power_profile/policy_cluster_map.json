@@ -1,0 +1,27 @@
+{
+  "serial": "adb-4LQWV47DYXT4GQSW-j7FoVL._adb-tls-connect._tcp",
+  "mapped_at": "2026-01-30T22:41:10+08:00",
+  "mapping_policy_to_cluster": {
+    "0": 0,
+    "4": 1,
+    "7": 2
+  },
+  "debug_scores": {
+    "0": {
+      "0": 140.0,
+      "1": 49.83870967741935,
+      "2": 38.125
+    },
+    "4": {
+      "0": 49.83870967741935,
+      "1": 140.0,
+      "2": 74.84848484848484
+    },
+    "7": {
+      "0": 38.125,
+      "1": 74.84848484848484,
+      "2": 140.0
+    }
+  },
+  "notes": "Mapping inferred by freq overlap + core count; verify once per device/ROM."
+}

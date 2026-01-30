@@ -1,0 +1,490 @@
+E: device (line=20)
+  A: name="Android" (Raw: "Android")
+    E: item (line=30)
+      A: name="ambient.on" (Raw: "ambient.on")
+        T: '0.1'
+    E: item (line=31)
+      A: name="screen.on" (Raw: "screen.on")
+        T: '103.39'
+    E: item (line=32)
+      A: name="screen.full" (Raw: "screen.full")
+        T: '324.42'
+    E: item (line=33)
+      A: name="bluetooth.active" (Raw: "bluetooth.active")
+        T: '5.72'
+    E: item (line=34)
+      A: name="bluetooth.on" (Raw: "bluetooth.on")
+        T: '0.85'
+    E: item (line=35)
+      A: name="bluetooth.controller.idle" (Raw: "bluetooth.controller.idle")
+        T: '0.73'
+    E: item (line=36)
+      A: name="bluetooth.controller.rx" (Raw: "bluetooth.controller.rx")
+        T: '81.84'
+    E: item (line=37)
+      A: name="bluetooth.controller.tx" (Raw: "bluetooth.controller.tx")
+        T: '88.93'
+    E: item (line=38)
+      A: name="wifi.on" (Raw: "wifi.on")
+        T: '0.45'
+    E: item (line=39)
+      A: name="wifi.active" (Raw: "wifi.active")
+        T: '180.53'
+    E: item (line=40)
+      A: name="wifi.scan" (Raw: "wifi.scan")
+        T: '22.09'
+    E: item (line=41)
+      A: name="audio" (Raw: "audio")
+        T: '34.92'
+    E: item (line=42)
+      A: name="video" (Raw: "video")
+        T: '42.39'
+    E: item (line=43)
+      A: name="camera.flashlight" (Raw: "camera.flashlight")
+        T: '144.97'
+    E: item (line=44)
+      A: name="camera.avg" (Raw: "camera.avg")
+        T: '661.79'
+    E: item (line=45)
+      A: name="gps.on" (Raw: "gps.on")
+        T: '34.77'
+    E: item (line=49)
+      A: name="radio.active" (Raw: "radio.active")
+        T: '172.65'
+    E: item (line=50)
+      A: name="radio.scanning" (Raw: "radio.scanning")
+        T: '82.25'
+    E: array (line=52)
+      A: name="radio.on" (Raw: "radio.on")
+        E: value (line=53)
+            T: '2.28'
+        E: value (line=54)
+            T: '2.28'
+    E: array (line=65)
+      A: name="cpu.clusters.cores" (Raw: "cpu.clusters.cores")
+        E: value (line=66)
+            T: '4'
+        E: value (line=67)
+            T: '3'
+        E: value (line=68)
+            T: '1'
+    E: array (line=76)
+      A: name="cpu.speeds.cluster0" (Raw: "cpu.speeds.cluster0")
+        E: value (line=77)
+            T: '480000'
+    E: array (line=83)
+      A: name="cpu.active.cluster0" (Raw: "cpu.active.cluster0")
+        E: value (line=84)
+            T: '0.1'
+    E: item (line=88)
+      A: name="cpu.idle" (Raw: "cpu.idle")
+        T: '6.96'
+    E: item (line=90)
+      A: name="cpu.suspend" (Raw: "cpu.suspend")
+        T: '5'
+    E: item (line=92)
+      A: name="cpu.active" (Raw: "cpu.active")
+        T: '20.20'
+    T: '. '
+    E: item (line=95)
+      A: name="cpu.cluster_power.cluster0" (Raw: "cpu.cluster_power.cluster0")
+        T: '2.11'
+    E: item (line=97)
+      A: name="cpu.cluster_power.cluster1" (Raw: "cpu.cluster_power.cluster1")
+        T: '2.22'
+    E: array (line=101)
+      A: name="cpu.core_speeds.cluster0" (Raw: "cpu.core_speeds.cluster0")
+        E: value (line=102)
+            T: '480000'
+        E: value (line=103)
+            T: '600000'
+        E: value (line=104)
+            T: '700000'
+        E: value (line=105)
+            T: '800000'
+        E: value (line=106)
+            T: '900000'
+        E: value (line=107)
+            T: '1000000'
+        E: value (line=108)
+            T: '1100000'
+        E: value (line=109)
+            T: '1200000'
+        E: value (line=110)
+            T: '1300000'
+        E: value (line=111)
+            T: '1400000'
+        E: value (line=112)
+            T: '1500000'
+        E: value (line=113)
+            T: '1600000'
+        E: value (line=114)
+            T: '1700000'
+        E: value (line=115)
+            T: '1800000'
+        E: value (line=116)
+            T: '1900000'
+        E: value (line=117)
+            T: '2000000'
+        E: value (line=118)
+            T: '2100000'
+        E: value (line=119)
+            T: '2200000'
+    E: array (line=123)
+      A: name="cpu.core_speeds.cluster1" (Raw: "cpu.core_speeds.cluster1")
+        E: value (line=124)
+            T: '400000'
+        E: value (line=125)
+            T: '500000'
+        E: value (line=126)
+            T: '600000'
+        E: value (line=127)
+            T: '700000'
+        E: value (line=128)
+            T: '800000'
+        E: value (line=129)
+            T: '900000'
+        E: value (line=130)
+            T: '1000000'
+        E: value (line=131)
+            T: '1100000'
+        E: value (line=132)
+            T: '1200000'
+        E: value (line=133)
+            T: '1300000'
+        E: value (line=134)
+            T: '1400000'
+        E: value (line=135)
+            T: '1500000'
+        E: value (line=136)
+            T: '1600000'
+        E: value (line=137)
+            T: '1700000'
+        E: value (line=138)
+            T: '1800000'
+        E: value (line=139)
+            T: '1900000'
+        E: value (line=140)
+            T: '2000000'
+        E: value (line=141)
+            T: '2100000'
+        E: value (line=142)
+            T: '2200000'
+        E: value (line=143)
+            T: '2300000'
+        E: value (line=144)
+            T: '2400000'
+        E: value (line=145)
+            T: '2500000'
+        E: value (line=146)
+            T: '2600000'
+        E: value (line=147)
+            T: '2660000'
+        E: value (line=148)
+            T: '2800000'
+        E: value (line=149)
+            T: '2850000'
+        E: value (line=150)
+            T: '2900000'
+        E: value (line=151)
+            T: '3000000'
+        E: value (line=152)
+            T: '3100000'
+        E: value (line=153)
+            T: '3200000'
+    E: array (line=157)
+      A: name="cpu.core_speeds.cluster2" (Raw: "cpu.core_speeds.cluster2")
+        E: value (line=158)
+            T: '400000'
+        E: value (line=159)
+            T: '500000'
+        E: value (line=160)
+            T: '600000'
+        E: value (line=161)
+            T: '700000'
+        E: value (line=162)
+            T: '800000'
+        E: value (line=163)
+            T: '900000'
+        E: value (line=164)
+            T: '1000000'
+        E: value (line=165)
+            T: '1100000'
+        E: value (line=166)
+            T: '1200000'
+        E: value (line=167)
+            T: '1300000'
+        E: value (line=168)
+            T: '1400000'
+        E: value (line=169)
+            T: '1500000'
+        E: value (line=170)
+            T: '1600000'
+        E: value (line=171)
+            T: '1700000'
+        E: value (line=172)
+            T: '1800000'
+        E: value (line=173)
+            T: '1900000'
+        E: value (line=174)
+            T: '2000000'
+        E: value (line=175)
+            T: '2100000'
+        E: value (line=176)
+            T: '2200000'
+        E: value (line=177)
+            T: '2300000'
+        E: value (line=178)
+            T: '2400000'
+        E: value (line=179)
+            T: '2500000'
+        E: value (line=180)
+            T: '2600000'
+        E: value (line=181)
+            T: '2700000'
+        E: value (line=182)
+            T: '2800000'
+        E: value (line=183)
+            T: '2900000'
+        E: value (line=184)
+            T: '3000000'
+        E: value (line=185)
+            T: '3050000'
+        E: value (line=186)
+            T: '3100000'
+        E: value (line=187)
+            T: '3200000'
+        E: value (line=188)
+            T: '3350000'
+    E: array (line=193)
+      A: name="cpu.core_power.cluster0" (Raw: "cpu.core_power.cluster0")
+        E: value (line=194)
+            T: '38.52'
+        E: value (line=195)
+            T: '41.32'
+        E: value (line=196)
+            T: '42.84'
+        E: value (line=197)
+            T: '44.34'
+        E: value (line=198)
+            T: '47.1'
+        E: value (line=199)
+            T: '49.91'
+        E: value (line=200)
+            T: '53.82'
+        E: value (line=201)
+            T: '58.48'
+        E: value (line=202)
+            T: '61.86'
+        E: value (line=203)
+            T: '64.86'
+        E: value (line=204)
+            T: '69.66'
+        E: value (line=205)
+            T: '75.43'
+        E: value (line=206)
+            T: '81.35'
+        E: value (line=207)
+            T: '87.5'
+        E: value (line=208)
+            T: '92.69'
+        E: value (line=209)
+            T: '98.33'
+        E: value (line=210)
+            T: '105.69'
+        E: value (line=211)
+            T: '113.29'
+    E: array (line=215)
+      A: name="cpu.core_power.cluster1" (Raw: "cpu.core_power.cluster1")
+        E: value (line=216)
+            T: '47.67'
+        E: value (line=217)
+            T: '51.96'
+        E: value (line=218)
+            T: '55.21'
+        E: value (line=219)
+            T: '58.12'
+        E: value (line=220)
+            T: '64.1'
+        E: value (line=221)
+            T: '71.36'
+        E: value (line=222)
+            T: '79.3'
+        E: value (line=223)
+            T: '87.33'
+        E: value (line=224)
+            T: '96.78'
+        E: value (line=225)
+            T: '106.99'
+        E: value (line=226)
+            T: '116.11'
+        E: value (line=227)
+            T: '129'
+        E: value (line=228)
+            T: '142.31'
+        E: value (line=229)
+            T: '158.08'
+        E: value (line=230)
+            T: '173.26'
+        E: value (line=231)
+            T: '181.16'
+        E: value (line=232)
+            T: '193.48'
+        E: value (line=233)
+            T: '215.69'
+        E: value (line=234)
+            T: '231.65'
+        E: value (line=235)
+            T: '252'
+        E: value (line=236)
+            T: '280.04'
+        E: value (line=237)
+            T: '297.59'
+        E: value (line=238)
+            T: '319.13'
+        E: value (line=239)
+            T: '335.04'
+        E: value (line=240)
+            T: '365.17'
+        E: value (line=241)
+            T: '383.71'
+        E: value (line=242)
+            T: '408.89'
+        E: value (line=243)
+            T: '470.19'
+        E: value (line=244)
+            T: '544.42'
+        E: value (line=245)
+            T: '586.8'
+    E: array (line=249)
+      A: name="cpu.core_power.cluster2" (Raw: "cpu.core_power.cluster2")
+        E: value (line=250)
+            T: '53.14'
+        E: value (line=251)
+            T: '57.95'
+        E: value (line=252)
+            T: '63.39'
+        E: value (line=253)
+            T: '68.57'
+        E: value (line=254)
+            T: '74.61'
+        E: value (line=255)
+            T: '83.08'
+        E: value (line=256)
+            T: '92.33'
+        E: value (line=257)
+            T: '99.75'
+        E: value (line=258)
+            T: '111.09'
+        E: value (line=259)
+            T: '123.33'
+        E: value (line=260)
+            T: '133.46'
+        E: value (line=261)
+            T: '143.07'
+        E: value (line=262)
+            T: '158.05'
+        E: value (line=263)
+            T: '174.41'
+        E: value (line=264)
+            T: '186.09'
+        E: value (line=265)
+            T: '207.24'
+        E: value (line=266)
+            T: '214.53'
+        E: value (line=267)
+            T: '229.67'
+        E: value (line=268)
+            T: '249.06'
+        E: value (line=269)
+            T: '275.79'
+        E: value (line=270)
+            T: '303.6'
+        E: value (line=271)
+            T: '336.61'
+        E: value (line=272)
+            T: '368.1'
+        E: value (line=273)
+            T: '403.64'
+        E: value (line=274)
+            T: '456.06'
+        E: value (line=275)
+            T: '524.11'
+        E: value (line=276)
+            T: '595.43'
+        E: value (line=277)
+            T: '605.46'
+        E: value (line=278)
+            T: '607.5'
+        E: value (line=279)
+            T: '614.25'
+        E: value (line=280)
+            T: '622.48'
+    E: array (line=285)
+      A: name="memory.bandwidths" (Raw: "memory.bandwidths")
+        E: value (line=286)
+            T: '22.7'
+    E: item (line=290)
+      A: name="battery.capacity" (Raw: "battery.capacity")
+        T: '5000'
+    E: item (line=294)
+      A: name="wifi.controller.idle" (Raw: "wifi.controller.idle")
+        T: '1'
+    E: item (line=296)
+      A: name="wifi.controller.rx" (Raw: "wifi.controller.rx")
+        T: '122'
+    E: item (line=298)
+      A: name="wifi.controller.tx" (Raw: "wifi.controller.tx")
+        T: '206'
+    E: array (line=302)
+      A: name="wifi.controller.tx_levels" (Raw: "wifi.controller.tx_levels")
+        E: value (line=303)
+            T: '1'
+    E: item (line=306)
+      A: name="wifi.controller.voltage" (Raw: "wifi.controller.voltage")
+        T: '4000'
+    E: array (line=308)
+      A: name="wifi.batchedscan" (Raw: "wifi.batchedscan")
+        E: value (line=309)
+            T: '.0002'
+        E: value (line=310)
+            T: '.002'
+        E: value (line=311)
+            T: '.02'
+        E: value (line=312)
+            T: '.2'
+        E: value (line=313)
+            T: '2'
+    E: item (line=317)
+      A: name="modem.controller.sleep" (Raw: "modem.controller.sleep")
+        T: '0'
+    E: item (line=318)
+      A: name="modem.controller.idle" (Raw: "modem.controller.idle")
+        T: '0'
+    E: item (line=319)
+      A: name="modem.controller.rx" (Raw: "modem.controller.rx")
+        T: '0'
+    E: array (line=320)
+      A: name="modem.controller.tx" (Raw: "modem.controller.tx")
+        E: value (line=321)
+            T: '0'
+        E: value (line=322)
+            T: '0'
+        E: value (line=323)
+            T: '0'
+        E: value (line=324)
+            T: '0'
+        E: value (line=325)
+            T: '0'
+    E: item (line=327)
+      A: name="modem.controller.voltage" (Raw: "modem.controller.voltage")
+        T: '0'
+    E: array (line=330)
+      A: name="gps.signalqualitybased" (Raw: "gps.signalqualitybased")
+        E: value (line=331)
+            T: '0'
+        E: value (line=332)
+            T: '0'
+    E: item (line=334)
+      A: name="gps.voltage" (Raw: "gps.voltage")
+        T: '0'

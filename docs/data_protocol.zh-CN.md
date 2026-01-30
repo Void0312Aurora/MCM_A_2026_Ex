@@ -46,6 +46,15 @@
 
 - `adb shell settings get system screen_brightness`
 
+备注：部分设备上 `adb shell settings put ...` 会因缺少 WRITE_SETTINGS 而失败。
+此时仍可通过“手动调节亮度 + ADB 读取数值(0–255)”完成严谨的 S2 亮度实验。
+可用脚本按当前亮度自动命名并开跑：
+- `D:/workshop/MP_power/.venv/Scripts/python.exe scripts/s2_run_from_current_brightness.py --duration 540 --thermal --auto-reset-battery`
+
+在一些机型上，也可以通过 AppOps 允许 shell 写设置（不保证所有系统都支持）：
+- `adb shell appops set com.android.shell WRITE_SETTINGS allow`
+随后即可尝试 `settings put system screen_brightness ...`。
+
 ### 2.4 CPU 频率与驻留（强推荐，利于解释功耗项）
 
 - 实时频率：`/sys/devices/system/cpu/cpu*/cpufreq/scaling_cur_freq`
@@ -55,12 +64,27 @@
 
 ## 3. 实验场景设计（用于估计不同功耗项）
 
-每组建议 20–40 分钟，记录开始/结束时刻与中途任何切换。
+本项目以“**可比性优先**”为目标：先把最小集合（S0/S1/S2）标准化，后续扩展再加场景。
 
-- S1 待机基线：屏幕关，分别在（飞行模式 / Wi‑Fi / 蜂窝）条件下测 P_base 与网络尾耗。
-- S2 屏幕功耗：固定其他条件，亮度设为 5 个档位（如 20/60/120/180/240），估计 P_screen(b)。
-- S3 CPU 负载：运行固定负载（例如本地 benchmark/视频解码），估计 P_cpu(u)。
-- S4 导航/GPS：固定亮度与网络，启用导航，估计 P_gps + 网络项。
+### 3.1 标准实验矩阵（必须遵守）
+
+请以 [docs/experiment_matrix.zh-CN.md](docs/experiment_matrix.zh-CN.md) 为准，它定义了：
+- 必须测什么（v0 最小集合）
+- 每条 run 的固定项/记录项
+- 统一的验收标准与剔除规则
+
+### 3.2 场景定义（v0 最小集合）
+
+> 重点不是“做很多对照”，而是“固定条件 + 可验收 + 可解释”。
+
+- S0 仪器自检（5–8 分钟）：验证无线 ADB 稳定、charge_counter 分辨率、thermal 列可用。
+- S1 基线（屏幕关）：在**固定网络条件**下估计 `P_base` 的均值与波动。
+- S2 亮度阶梯（屏幕开）：在**固定网络条件**下估计 `P_screen(brightness)`。
+
+### 3.3 可选扩展（按需要添加）
+
+- S3 CPU 负载：用于校准/解释 CPU 项（time_in_state + power_profile 缩放）。
+- S4 网络模式：用于区分 Wi‑Fi vs 蜂窝等状态常值项（不追求穷举对照）。
 
 ## 4. 数据格式（CSV 规范建议）
 
@@ -87,10 +111,18 @@
 	- `D:/workshop/MP_power/.venv/Scripts/python.exe scripts/adb_sample_power.py --scenario S1 --duration 600 --interval 2 --auto-reset-battery`
 	- 默认输出到：`artifacts/runs/<run_id>_<scenario>.csv`
 	- 若同时连了多个设备，建议显式指定：`--serial <adb devices -l 显示的serial>`
+	- 可选采集热传感器：追加 `--thermal`（会增加 `thermal_status` 与 `thermal_<name>_C` 列）
 
 - 自动推断 cpufreq policy → power_profile cluster 映射（用于后续批量算能耗列）：
 	- `D:/workshop/MP_power/.venv/Scripts/python.exe scripts/map_policy_to_cluster.py --serial <serial>`
 	- 产物输出到：`artifacts/android/power_profile/policy_cluster_map.json`
+
+- 基于 mapping + power_profile 批量给采样 CSV 增加 CPU 能耗列（每个 policy + 总和）：
+	- `D:/workshop/MP_power/.venv/Scripts/python.exe scripts/enrich_run_with_cpu_energy.py --run-csv artifacts/runs/<run.csv> --out artifacts/runs/<run_enriched.csv>`
+
+- 固定流水线（一条命令串起：采样→能耗列→报告图表）：
+	- `D:/workshop/MP_power/.venv/Scripts/python.exe scripts/pipeline_run.py --scenario S1 --duration 1200 --interval 2 --thermal --auto-reset-battery`
+	- 输出：`artifacts/runs/<run>_enriched.csv` + `artifacts/reports/<run>_enriched/summary.md` + `timeseries.png`
 
 - 用 time_in_state 增量估算某个 policy 对应 cluster 的 CPU 能耗（mJ）：
 	- `D:/workshop/MP_power/.venv/Scripts/python.exe scripts/parse_time_in_state.py --cluster-csv artifacts/android/power_profile/cluster0_freq_power.csv --deltas-csv artifacts/runs/<run.csv> --out artifacts/runs/<run_with_energy.csv> --policy 0`
@@ -101,6 +133,12 @@
 - 采样时避免系统自动更新/备份等强扰动（尽量在相同网络环境、相似后台状态下重复实验）。
 - 屏幕自动亮度/高刷/省电模式应在元数据中注明（最好固定）。
 - 电量百分比有量化误差与迟滞，若 charge counter 可用，优先用于短时间窗口的能量/电荷变化估计。
+
+### 5.1 统一验收门槛（强制）
+
+- 该 run 必须满足：`adb_error` 全为空（或剔除后剩余有效时长 ≥ 目标时长的 95%）。
+- 若出现 `UPDATES STOPPED`，必须 reset 并恢复到 `battery_updates_stopped=0`，否则该段作废。
+- S2 亮度阶梯：每个档位内 `brightness` 应为常数（阶跃变化只发生在切档时刻）。
 
 ## 6. 数据合规与引用
 

@@ -202,6 +202,24 @@ def _read_brightness(adb: str, serial: str | None, timeout_s: float) -> int | No
         return None
 
 
+_RE_DISPLAY_POWER_STATE = re.compile(r"Display Power:\s*state=(\w+)")
+
+
+def _read_display_state(adb: str, serial: str | None, timeout_s: float) -> str | None:
+    """Best-effort display state from `dumpsys power`.
+
+    Returns one of ON/OFF/DOZE/UNKNOWN-ish strings, or None if unavailable.
+    """
+    base = ["-s", serial] if serial else []
+    rc, out, _ = _run(adb, [*base, "shell", "dumpsys", "power"], timeout_s=timeout_s)
+    if rc != 0:
+        return None
+    m = _RE_DISPLAY_POWER_STATE.search(out)
+    if not m:
+        return None
+    return m.group(1)
+
+
 def _read_time_in_state(adb: str, serial: str | None, policy: int, timeout_s: float) -> dict[int, int] | None:
     base = ["-s", serial] if serial else []
     path = f"/sys/devices/system/cpu/cpufreq/policy{policy}/stats/time_in_state"
@@ -321,10 +339,17 @@ def main() -> int:
     parser.add_argument("--auto-reset-battery", action="store_true", help="Auto reset battery service if UPDATES STOPPED")
     parser.add_argument("--policies", default="0,4,7", help="Comma-separated cpufreq policies to sample")
     parser.add_argument("--thermal", action="store_true", help="Also sample dumpsys thermalservice")
+    parser.add_argument("--display", action="store_true", help="Also sample dumpsys power display state")
     parser.add_argument(
         "--thermal-names",
         default="BATTERY,SKIN,SOC,CPU,GPU,NPU,TPU,POWER_AMPLIFIER",
         help="Comma-separated thermal sensor names to extract when --thermal is enabled",
+    )
+    parser.add_argument(
+        "--log-every",
+        type=float,
+        default=60.0,
+        help="Print a progress line every N seconds (0 disables)",
     )
     args = parser.parse_args()
 
@@ -388,6 +413,9 @@ def main() -> int:
         "adb_error",
     ]
 
+    if args.display:
+        fixed_cols.append("display_state")
+
     if args.thermal:
         fixed_cols.append("thermal_status")
         for name in sorted(want_thermal_names):
@@ -401,6 +429,9 @@ def main() -> int:
         writer.writeheader()
 
         seq = 0
+        last_log_t = 0.0
+        if args.log_every and args.log_every > 0:
+            print(f"Sampling -> {out_path} (interval={args.interval}s, duration={args.duration}s)")
         while time.time() < t_end:
             ts = _iso_now()
             row: dict[str, object] = {c: "" for c in cols}
@@ -421,6 +452,9 @@ def main() -> int:
                 row["battery_updates_stopped"] = int(batt.raw_updates_stopped)
 
                 row["brightness"] = _read_brightness(adb, args.serial, timeout_s=4.0)
+
+                if args.display:
+                    row["display_state"] = _read_display_state(adb, args.serial, timeout_s=8.0) or ""
 
                 if args.thermal:
                     therm = _read_thermalservice(adb, args.serial, timeout_s=8.0, want_names=want_thermal_names)
@@ -451,6 +485,15 @@ def main() -> int:
             writer.writerow(row)
             f.flush()
             seq += 1
+
+            if args.log_every and args.log_every > 0:
+                now_t = time.time()
+                if now_t - last_log_t >= float(args.log_every):
+                    last_log_t = now_t
+                    v = row.get("battery_voltage_mv", "")
+                    lvl = row.get("battery_level", "")
+                    err = row.get("adb_error", "")
+                    print(f"[sample] seq={seq} ts={ts} level={lvl} voltage_mv={v} adb_error={err}")
             time.sleep(float(args.interval))
 
     print(f"Wrote: {out_path}")

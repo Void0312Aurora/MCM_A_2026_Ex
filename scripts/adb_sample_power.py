@@ -90,10 +90,30 @@ class BatteryPropertiesReading:
 
 
 _BPROPS_KV = {
-    "current_now": re.compile(r"^\s*current_now:\s*([-]?\d+)\s*$", re.MULTILINE),
-    "current_average": re.compile(r"^\s*current_average:\s*([-]?\d+)\s*$", re.MULTILINE),
-    "energy_counter": re.compile(r"^\s*energy_counter:\s*([-]?\d+)\s*$", re.MULTILINE),
-    "charge_counter": re.compile(r"^\s*Charge counter:\s*(\d+)\s*$", re.MULTILINE),
+    # Various formats observed across Android/OEM builds:
+    # - current_now: -123456
+    # - currentNow: -123456
+    # - mCurrentNow= -123456
+    "current_now": re.compile(r"(?:^\s*(?:current_now|currentNow|CurrentNow)\s*:\s*([-]?\d+)\s*$|mCurrentNow\s*=\s*([-]?\d+))", re.MULTILINE),
+    # - current_average: -123456
+    # - currentAverage: -123456
+    # - mCurrentAverage= -123456
+    "current_average": re.compile(
+        r"(?:^\s*(?:current_average|currentAverage|CurrentAverage)\s*:\s*([-]?\d+)\s*$|mCurrentAverage\s*=\s*([-]?\d+))",
+        re.MULTILINE,
+    ),
+    # - energy_counter: 123456
+    # - energyCounter: 123456
+    # - mEnergyCounter= 123456
+    "energy_counter": re.compile(
+        r"(?:^\s*(?:energy_counter|energyCounter|EnergyCounter)\s*:\s*([-]?\d+)\s*$|mEnergyCounter\s*=\s*([-]?\d+))",
+        re.MULTILINE,
+    ),
+    # Prefer batteryproperties charge counter if present, else keep dumpsys battery Charge counter
+    "charge_counter": re.compile(
+        r"(?:^\s*(?:charge_counter|chargeCounter|ChargeCounter)\s*:\s*(\d+)\s*$|mChargeCounter\s*=\s*(\d+))",
+        re.MULTILINE,
+    ),
 }
 
 
@@ -102,7 +122,15 @@ def _parse_int(regex: re.Pattern[str], text: str) -> int | None:
     if not m:
         return None
     try:
-        return int(m.group(1))
+        # Support multiple capturing groups: return the first non-empty group.
+        for i in range(1, (m.lastindex or 0) + 1):
+            g = m.group(i)
+            if g is None:
+                continue
+            g = str(g).strip()
+            if g:
+                return int(g)
+        return None
     except Exception:
         return None
 
@@ -238,6 +266,8 @@ def _read_brightness(adb: str, serial: str | None, timeout_s: float) -> int | No
 
 
 _RE_DISPLAY_POWER_STATE = re.compile(r"Display Power:\s*state=(\w+)")
+_RE_SCREEN_STATE = re.compile(r"\bmScreenState=(\w+)\b")
+_RE_DISPLAYDEVICEINFO_STATE = re.compile(r"\bDisplayDeviceInfo\{.*?\bstate\s+(\w+),\s*committedState\s+(\w+)", re.IGNORECASE)
 
 
 def _read_display_state(adb: str, serial: str | None, timeout_s: float) -> str | None:
@@ -246,13 +276,25 @@ def _read_display_state(adb: str, serial: str | None, timeout_s: float) -> str |
     Returns one of ON/OFF/DOZE/UNKNOWN-ish strings, or None if unavailable.
     """
     base = ["-s", serial] if serial else []
+
+    # Prefer `dumpsys display` (more stable across OEMs).
+    rc, out, _ = _run(adb, [*base, "shell", "dumpsys", "display"], timeout_s=timeout_s)
+    if rc == 0:
+        m = _RE_SCREEN_STATE.search(out)
+        if m:
+            return m.group(1)
+        m2 = _RE_DISPLAYDEVICEINFO_STATE.search(out)
+        if m2:
+            return m2.group(1)
+
+    # Fallback: older AOSP format in `dumpsys power`.
     rc, out, _ = _run(adb, [*base, "shell", "dumpsys", "power"], timeout_s=timeout_s)
     if rc != 0:
         return None
-    m = _RE_DISPLAY_POWER_STATE.search(out)
-    if not m:
+    m3 = _RE_DISPLAY_POWER_STATE.search(out)
+    if not m3:
         return None
-    return m.group(1)
+    return m3.group(1)
 
 
 def _read_time_in_state(adb: str, serial: str | None, policy: int, timeout_s: float) -> dict[int, int] | None:

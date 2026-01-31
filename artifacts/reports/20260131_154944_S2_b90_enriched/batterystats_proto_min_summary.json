@@ -1,0 +1,39 @@
+{
+  "label": "20260131_154944_S2_b90",
+  "start_pb": "artifacts\\reports\\20260131_154944_S2_b90_enriched\\batterystats_start.pb",
+  "end_pb": "artifacts\\reports\\20260131_154944_S2_b90_enriched\\batterystats_end.pb",
+  "end": {
+    "battery_realtime_ms": 543200,
+    "battery_uptime_ms": 543200,
+    "screen_off_realtime_ms": null,
+    "screen_off_uptime_ms": null,
+    "screen_doze_duration_ms": null,
+    "total_mah": 38,
+    "total_mah_screen_off": null,
+    "total_mah_screen_doze": null,
+    "total_mah_light_doze": null,
+    "total_mah_deep_doze": null,
+    "screen_on_duration_ms": 543200,
+    "interactive_duration_ms": 543200
+  },
+  "delta": {
+    "battery_realtime_ms": 542841,
+    "battery_uptime_ms": 542841,
+    "screen_off_realtime_ms": null,
+    "screen_off_uptime_ms": null,
+    "screen_doze_duration_ms": null,
+    "total_mah": 38,
+    "total_mah_screen_off": null,
+    "total_mah_screen_doze": null,
+    "total_mah_light_doze": null,
+    "total_mah_deep_doze": null,
+    "screen_on_duration_ms": 542841,
+    "interactive_duration_ms": 542841
+  },
+  "derived": {
+    "duration_s": 542.841,
+    "avg_current_mA": 252.00749390705565,
+    "screen_on_duration_s": 542.841,
+    "avg_current_per_screen_on_hour_mA": 252.00749390705565
+  }
+}

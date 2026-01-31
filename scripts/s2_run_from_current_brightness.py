@@ -85,6 +85,30 @@ def main() -> int:
         help="Also sample dumpsys batteryproperties (current_now/current_average if available)",
     )
     p.add_argument("--auto-reset-battery", action="store_true")
+    p.add_argument(
+        "--batterystats-proto",
+        action="store_true",
+        help="Capture `dumpsys batterystats --proto` before/after and parse coulomb-counter discharge totals (schema-min).",
+    )
+    p.add_argument(
+        "--batterystats-proto-reset",
+        action="store_true",
+        help="Run `dumpsys batterystats --reset` before capturing START proto.",
+    )
+    p.add_argument(
+        "--perfetto-android-power",
+        action="store_true",
+        help=(
+            "Record Perfetto android.power battery counters during the run and parse them into "
+            "perfetto_android_power_summary.csv/json + timeseries.csv in the report dir."
+        ),
+    )
+    p.add_argument(
+        "--perfetto-battery-poll-ms",
+        type=int,
+        default=250,
+        help="Perfetto android.power battery polling period (ms).",
+    )
     p.add_argument("--log-every", type=float, default=30.0)
     p.add_argument(
         "--set-brightness",
@@ -189,6 +213,12 @@ def main() -> int:
         cmd += ["--batteryproperties"]
     if args.auto_reset_battery:
         cmd += ["--auto-reset-battery"]
+    if args.batterystats_proto:
+        cmd += ["--batterystats-proto"]
+    if args.batterystats_proto_reset:
+        cmd += ["--batterystats-proto-reset"]
+    if args.perfetto_android_power:
+        cmd += ["--perfetto-android-power", "--perfetto-battery-poll-ms", str(args.perfetto_battery_poll_ms)]
 
     print("Running:", " ".join(cmd))
     return subprocess.run(cmd).returncode

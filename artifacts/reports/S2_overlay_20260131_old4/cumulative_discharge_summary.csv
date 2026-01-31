@@ -1,0 +1,4 @@
+label,brightness,duration_s,final_discharge_uAh,n_steps,discharge_frac_at_time_0.25,discharge_frac_at_time_0.50,discharge_frac_at_time_0.75
+S2_b30,30.0,539.0,50000.0,2,0.44,0.44,1.0
+S2_b150,150.0,538.0,48000.0,2,0.14583333333333334,0.14583333333333334,0.14583333333333334
+S2_b210,210.0,538.0,26000.0,3,0.15384615384615385,1.0,1.0

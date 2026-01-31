@@ -1,0 +1,18 @@
+Current Battery Service state:
+  AC powered: false
+  USB powered: false
+  Wireless powered: false
+  Dock powered: false
+  Max charging current: 0
+  Max charging voltage: 0
+  Charge counter: 1760000
+  status: 3
+  health: 2
+  present: true
+  level: 36
+  scale: 100
+  voltage: 3786
+  temperature: 326
+  technology: Li-poly
+  Charging state: 0
+  Charging policy: 0

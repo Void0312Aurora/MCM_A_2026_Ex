@@ -1,0 +1,13 @@
+metric,value
+battery_realtime_ms,60001626
+battery_uptime_ms,35890249
+screen_off_realtime_ms,36625177
+screen_off_uptime_ms,12513803
+screen_doze_duration_ms,4310
+total_mah,4312
+total_mah_screen_off,1470
+total_mah_screen_doze,
+total_mah_light_doze,112
+total_mah_deep_doze,999
+screen_on_duration_ms,23376449
+interactive_duration_ms,23390456

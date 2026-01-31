@@ -1,6 +1,6 @@
 # 已审阅的可用功耗/电池数据（ADB）
 
-更新时间：2026-01-30
+更新时间：2026-01-31
 
 本文记录在本工作区/本机/已连接手机上，通过 ADB 已验证可访问、可提取、可用于建模/验证的功耗相关数据，以及已发现但可能受限或需要进一步解析的配置文件。
 
@@ -27,6 +27,19 @@
   - `Charge counter`（uAh，设备支持时）
 
 备注：曾出现 `UPDATES STOPPED`，已验证可通过 `adb shell dumpsys battery reset` 或 `adb shell cmd battery reset` 恢复。
+
+### 2.1.1 Perfetto `android.power` 电池计数器（高频，强烈推荐优先验证）
+
+- 结论（已在本机型验证）：无 root 条件下，Perfetto 的 `android.power` data source **可以**采到电池高频计数器轨道：
+  - `batt.current_ua`（瞬时电流）
+  - `batt.voltage_uv`（本机实际数值表现更像 mV；解析脚本会自动做单位推断）
+  - `batt.charge_uah`（电量计数器）
+  - `batt.capacity_pct`
+- 优势：采样间隔可到 250ms 量级，显著缓解 `dumpsys battery` 的 `Charge counter` 低频/阶梯化问题，适合 9 分钟硬约束下做趋势对比。
+
+仓库支持：
+- 采集：`scripts/pipeline_run.py` 增加 `--perfetto-android-power`（与采样并行录制，结束后自动拉取并解析）。
+- 解析：`scripts/parse_perfetto_android_power_counters.py`（输出 timeseries CSV + summary CSV/JSON）。
 
 ### 2.2 热数据（可用于热模型/温度影响）
 

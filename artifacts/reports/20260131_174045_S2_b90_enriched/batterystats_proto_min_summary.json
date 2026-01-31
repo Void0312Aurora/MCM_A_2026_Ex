@@ -1,0 +1,34 @@
+{
+  "label": "S2_b90",
+  "start_pb": "artifacts\\reports\\20260131_174045_S2_b90_enriched\\batterystats_start.pb",
+  "end_pb": "artifacts\\reports\\20260131_174045_S2_b90_enriched\\batterystats_end.pb",
+  "end": {
+    "battery_realtime_ms": null,
+    "battery_uptime_ms": null,
+    "screen_off_realtime_ms": null,
+    "screen_off_uptime_ms": null,
+    "screen_doze_duration_ms": null,
+    "total_mah": null,
+    "total_mah_screen_off": null,
+    "total_mah_screen_doze": null,
+    "total_mah_light_doze": null,
+    "total_mah_deep_doze": null,
+    "screen_on_duration_ms": null,
+    "interactive_duration_ms": null
+  },
+  "delta": {
+    "battery_realtime_ms": null,
+    "battery_uptime_ms": null,
+    "screen_off_realtime_ms": null,
+    "screen_off_uptime_ms": null,
+    "screen_doze_duration_ms": null,
+    "total_mah": null,
+    "total_mah_screen_off": null,
+    "total_mah_screen_doze": null,
+    "total_mah_light_doze": null,
+    "total_mah_deep_doze": null,
+    "screen_on_duration_ms": null,
+    "interactive_duration_ms": null
+  },
+  "derived": {}
+}

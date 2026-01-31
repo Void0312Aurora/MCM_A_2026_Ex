@@ -68,6 +68,12 @@ def summarize(path: Path) -> dict[str, object]:
 def main() -> int:
     ap = argparse.ArgumentParser(description="Summarize one or more run CSVs (prefer enriched)")
     ap.add_argument("--csv", type=Path, nargs="+", required=True)
+    ap.add_argument(
+        "--pool-by",
+        choices=["none", "brightness", "scenario"],
+        default="none",
+        help="Optionally pool multiple runs by a key and report pooled mean power (sum energy / sum time).",
+    )
     args = ap.parse_args()
 
     rows = []
@@ -78,6 +84,30 @@ def main() -> int:
     # prettier numeric output
     with pd.option_context("display.max_columns", 200, "display.width", 160):
         print(out.to_string(index=False, float_format=lambda x: f"{x:.3f}"))
+
+    if args.pool_by != "none" and len(out):
+        key = args.pool_by
+        # Use safe numeric conversion
+        tmp = out.copy()
+        for c in ["dt_sum_s", "discharge_sum_mJ", "mean_power_mW_total", "brightness"]:
+            if c in tmp.columns:
+                tmp[c] = pd.to_numeric(tmp[c], errors="coerce")
+
+        # Pool = sum(energy) / sum(time)
+        grp = tmp.groupby(key, dropna=False, as_index=False)
+        pooled = grp.agg(
+            n_runs=("file", "count"),
+            dt_sum_s=("dt_sum_s", "sum"),
+            discharge_sum_mJ=("discharge_sum_mJ", "sum"),
+            mean_voltage_mV=("mean_voltage_mV", "mean"),
+            d_uAh_nonzero_frac_mean=("d_uAh_nonzero_frac", "mean"),
+            d_uAh_neg_median_median=("d_uAh_neg_median", "median"),
+        )
+        pooled["mean_power_mW_pooled"] = pooled["discharge_sum_mJ"] / pooled["dt_sum_s"]
+
+        print("\n--- pooled ---")
+        with pd.option_context("display.max_columns", 200, "display.width", 160):
+            print(pooled.to_string(index=False, float_format=lambda x: f"{x:.3f}"))
     return 0
 
 

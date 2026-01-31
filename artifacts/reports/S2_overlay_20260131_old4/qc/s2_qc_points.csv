@@ -1,0 +1,5 @@
+label,path,brightness,samples,duration_s,discharge_mAh_cc,discharge_mAh_bs,discharge_mAh_preferred,preferred_source,v_mean_V,p_avg_W_preferred,is_valid,invalid_reason,bs_quantization_rel_err_max
+S2_b30,artifacts/runs/20260131_021840_S2_b30_enriched.csv,30,170,539.0,50.0,,50.0,charge_counter,4.109694117647059,1.372439594019426,True,,
+S2_b90,artifacts/runs/20260131_021541_S2_b90_enriched.csv,90,2,3.0,0.0,,0.0,charge_counter,4.132,0.0,False,rows<30;duration<60s,
+S2_b150,artifacts/runs/20260131_023908_S2_b150_enriched.csv,150,170,538.0,48.0,,48.0,charge_counter,4.085023529411765,1.3120670369560465,True,,
+S2_b210,artifacts/runs/20260131_024931_S2_b210_enriched.csv,210,170,538.0,26.0,,26.0,charge_counter,4.068658823529412,0.7078558845396895,True,,

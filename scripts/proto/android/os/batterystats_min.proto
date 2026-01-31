@@ -1,0 +1,60 @@
+syntax = "proto2";
+
+package android.os;
+
+// `dumpsys batterystats --proto` wraps the real BatteryStatsProto in a top-level message.
+// Wire-inspection on-device shows the top-level has only field 1 (length-delimited).
+message BatteryStatsServiceDumpProto {
+  optional BatteryStatsProto batterystats = 1;
+}
+
+// Minimal schema to extract coulomb-counter based discharge totals and a few timing fields.
+// This intentionally omits most of BatteryStatsProto to avoid external imports.
+message BatteryStatsProto {
+  optional SystemProto system = 6;
+}
+
+message SystemProto {
+  optional Battery battery = 1;
+  optional BatteryDischarge battery_discharge = 2;
+  optional Misc misc = 15;
+
+  message Battery {
+    optional int64 start_clock_time_ms = 1;
+    optional int64 start_count = 2;
+    optional int64 total_realtime_ms = 3;
+    optional int64 total_uptime_ms = 4;
+    optional int64 battery_realtime_ms = 5;
+    optional int64 battery_uptime_ms = 6;
+    optional int64 screen_off_realtime_ms = 7;
+    optional int64 screen_off_uptime_ms = 8;
+    optional int64 screen_doze_duration_ms = 9;
+    optional int64 estimated_battery_capacity_mah = 10;
+    optional int64 min_learned_battery_capacity_uah = 11;
+    optional int64 max_learned_battery_capacity_uah = 12;
+  }
+
+  message BatteryDischarge {
+    optional int32 lower_bound_since_charge = 1;
+    optional int32 upper_bound_since_charge = 2;
+    optional int32 screen_on_since_charge = 3;
+    optional int32 screen_off_since_charge = 4;
+    optional int32 screen_doze_since_charge = 5;
+
+    // These are non-zero only on devices with a coulomb counter.
+    optional int64 total_mah = 6;
+    optional int64 total_mah_screen_off = 7;
+    optional int64 total_mah_screen_doze = 8;
+    optional int64 total_mah_light_doze = 9;
+    optional int64 total_mah_deep_doze = 10;
+  }
+
+  message Misc {
+    optional int64 screen_on_duration_ms = 1;
+    optional int64 phone_on_duration_ms = 2;
+    optional int64 full_wakelock_total_duration_ms = 3;
+    optional int64 partial_wakelock_total_duration_ms = 4;
+    optional int64 mobile_radio_active_duration_ms = 5;
+    optional int64 interactive_duration_ms = 9;
+  }
+}

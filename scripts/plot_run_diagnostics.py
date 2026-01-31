@@ -104,6 +104,31 @@ def add_derived(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+def _load_perfetto_timeseries(report_dir: Path) -> pd.DataFrame | None:
+    ts_path = report_dir / "perfetto_android_power_timeseries.csv"
+    if not ts_path.exists():
+        return None
+    try:
+        pf = pd.read_csv(ts_path)
+    except Exception:
+        return None
+
+    if "t_s" not in pf.columns:
+        return None
+
+    # Coerce numerics; keep only relevant columns if present.
+    keep = [c for c in ["t_s", "batt.charge_uah", "batt.current_ua", "batt.voltage_uv", "power_mw_calc"] if c in pf.columns]
+    pf = pf[keep].copy()
+    for c in keep:
+        pf[c] = pd.to_numeric(pf[c], errors="coerce")
+
+    # Add discharge-from-start for easier comparison with charge_counter steps.
+    if "batt.charge_uah" in pf.columns and pf["batt.charge_uah"].notna().any():
+        start = float(pf["batt.charge_uah"].dropna().iloc[0])
+        pf["batt.discharge_uah"] = start - pf["batt.charge_uah"]
+    return pf
+
+
 def _rolling_mean(s: pd.Series, df: pd.DataFrame, seconds: int) -> pd.Series:
     if "ts" in df.columns and isinstance(df.index, pd.DatetimeIndex):
         return s.rolling(f"{seconds}s", min_periods=1).mean()
@@ -112,7 +137,7 @@ def _rolling_mean(s: pd.Series, df: pd.DataFrame, seconds: int) -> pd.Series:
     return s.rolling(n, min_periods=1).mean()
 
 
-def plot_single_run(df: pd.DataFrame, info: RunInfo, out_path: Path, rolling_s: int) -> None:
+def plot_single_run(df: pd.DataFrame, info: RunInfo, out_path: Path, rolling_s: int, perfetto_ts: pd.DataFrame | None = None) -> None:
     cols = set(df.columns)
 
     fig, axes = plt.subplots(6, 1, figsize=(12, 16), sharex=True)
@@ -121,6 +146,19 @@ def plot_single_run(df: pd.DataFrame, info: RunInfo, out_path: Path, rolling_s: 
     # 1) charge_counter (step-like)
     if "charge_counter_uAh" in cols:
         axes[0].step(x, df["charge_counter_uAh"], where="post", label="charge_counter_uAh")
+
+    # If perfetto android.power exists, overlay discharge curve (usually much higher sample rate)
+    if perfetto_ts is not None and "batt.discharge_uah" in perfetto_ts.columns and perfetto_ts["batt.discharge_uah"].notna().any():
+        ax0b = axes[0].twinx()
+        ax0b.plot(
+            perfetto_ts["t_s"],
+            perfetto_ts["batt.discharge_uah"],
+            label="perfetto discharge_uAh (from batt.charge_uah)",
+            color="tab:green",
+            alpha=0.7,
+        )
+        ax0b.set_ylabel("perfetto discharge (uAh)")
+        ax0b.legend(loc="upper right")
     axes[0].set_ylabel("uAh")
     axes[0].set_title(info.label)
     axes[0].grid(True, alpha=0.3)
@@ -146,6 +184,24 @@ def plot_single_run(df: pd.DataFrame, info: RunInfo, out_path: Path, rolling_s: 
         )
     if "batt_discharge_power_mW_cc" in cols and df["batt_discharge_power_mW_cc"].notna().any():
         axes[2].plot(x, df["batt_discharge_power_mW_cc"], label="P_discharge (mW) from charge_counter", color="tab:olive", alpha=0.35)
+
+    # Perfetto power (preferred when available)
+    if perfetto_ts is not None and "power_mw_calc" in perfetto_ts.columns and perfetto_ts["power_mw_calc"].notna().any():
+        pfp = perfetto_ts["power_mw_calc"]
+        axes[2].plot(
+            perfetto_ts["t_s"],
+            pfp,
+            label="P_discharge (mW) perfetto calc",
+            color="tab:pink",
+            alpha=0.25,
+        )
+        axes[2].plot(
+            perfetto_ts["t_s"],
+            pfp.rolling(max(1, int(rolling_s / 0.25)), min_periods=1).mean(),
+            label=f"P_perfetto rolling mean (~{rolling_s}s)",
+            color="tab:pink",
+            linewidth=2.0,
+        )
 
     # If current_now/current_average exist, plot them (often much smoother than charge_counter deltas)
     if "batt_discharge_power_mW_current_now" in cols and df["batt_discharge_power_mW_current_now"].notna().any():
@@ -353,12 +409,21 @@ def main() -> int:
     ap.add_argument("--csv", type=Path, nargs="+", required=True, help="Input run CSV(s), prefer *_enriched.csv")
     ap.add_argument("--out-dir", type=Path, default=Path("artifacts") / "plots" / "run_diagnostics")
     ap.add_argument("--rolling-s", type=int, default=60, help="Rolling mean window (seconds)")
+    ap.add_argument("--min-rows", type=int, default=30, help="Skip from overlay/summary if rows < this (still writes per-run plot)")
+    ap.add_argument(
+        "--min-duration-s",
+        type=float,
+        default=60.0,
+        help="Skip from overlay/summary if duration (from t_s) < this (still writes per-run plot)",
+    )
     args = ap.parse_args()
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
 
     loaded: list[tuple[pd.DataFrame, RunInfo]] = []
+    loaded_valid: list[tuple[pd.DataFrame, RunInfo]] = []
     step_events: list[pd.DataFrame] = []
+    skipped_rows: list[dict[str, object]] = []
     for p in args.csv:
         df = pd.read_csv(p)
         label, brightness = _infer_label(df, p.stem)
@@ -367,23 +432,67 @@ def main() -> int:
         info = RunInfo(path=p, label=label, brightness=brightness)
         loaded.append((df, info))
 
+        # Auto-detect corresponding report dir for perfetto android.power outputs.
+        report_dir = Path("artifacts") / "reports" / p.stem
+        perfetto_ts = _load_perfetto_timeseries(report_dir)
+
+        # Validity check for overlay/summary (avoid extremely short / aborted runs)
+        duration_s = None
+        if "t_s" in df.columns:
+            t_s = pd.to_numeric(df["t_s"], errors="coerce")
+            if t_s.notna().any():
+                duration_s = float(t_s.dropna().iloc[-1] - t_s.dropna().iloc[0])
+
+        reasons: list[str] = []
+        if len(df) < args.min_rows:
+            reasons.append(f"rows<{args.min_rows}")
+        if duration_s is None:
+            reasons.append("duration=NA")
+        elif duration_s < args.min_duration_s:
+            reasons.append(f"duration<{args.min_duration_s:.0f}s")
+
+        if reasons:
+            skipped_rows.append(
+                {
+                    "label": info.label,
+                    "path": str(p).replace("\\", "/"),
+                    "rows": int(len(df)),
+                    "duration_s": duration_s,
+                    "reason": ";".join(reasons),
+                }
+            )
+        else:
+            loaded_valid.append((df, info))
+
         ev = _step_events(df, info)
         if len(ev):
             step_events.append(ev)
 
         out_path = args.out_dir / f"{label}_diagnostics.png"
-        plot_single_run(df, info, out_path, rolling_s=args.rolling_s)
+        plot_single_run(df, info, out_path, rolling_s=args.rolling_s, perfetto_ts=perfetto_ts)
         print(f"Wrote: {out_path}")
+
+    if skipped_rows:
+        skipped_path = args.out_dir / "skipped_runs.csv"
+        pd.DataFrame(skipped_rows).to_csv(skipped_path, index=False, encoding="utf-8")
+        print(f"Wrote: {skipped_path}")
 
     # One overlay chart for quick comparison
     overlay_path = args.out_dir / "overlay_power_cpu_thermal.png"
-    plot_overlay_power(loaded, overlay_path, rolling_s=args.rolling_s)
-    print(f"Wrote: {overlay_path}")
+    if loaded_valid:
+        plot_overlay_power(loaded_valid, overlay_path, rolling_s=args.rolling_s)
+        print(f"Wrote: {overlay_path}")
+    else:
+        print("No valid runs for overlay_power_cpu_thermal.png (all skipped)")
 
     # Normalized cumulative discharge + step event export
     cum_path = args.out_dir / "overlay_cumulative_discharge_normalized.png"
-    summary = plot_cumulative_discharge_normalized(loaded, cum_path)
-    print(f"Wrote: {cum_path}")
+    if loaded_valid:
+        summary = plot_cumulative_discharge_normalized(loaded_valid, cum_path)
+        print(f"Wrote: {cum_path}")
+    else:
+        summary = pd.DataFrame()
+        print("No valid runs for overlay_cumulative_discharge_normalized.png (all skipped)")
 
     if len(summary):
         summary_path = args.out_dir / "cumulative_discharge_summary.csv"

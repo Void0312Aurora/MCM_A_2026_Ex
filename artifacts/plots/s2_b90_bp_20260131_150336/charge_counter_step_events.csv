@@ -1,0 +1,4 @@
+label,brightness,t_s,d_charge_uAh,d_charge_uAh_abs,is_discharge_step
+S2_b90,90.0,69.0,-23000.0,23000.0,True
+S2_b90,90.0,250.0,-22000.0,22000.0,True
+S2_b90,90.0,279.0,-4000.0,4000.0,True

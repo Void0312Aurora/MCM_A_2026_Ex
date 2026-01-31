@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import os
 import re
 import subprocess
@@ -69,6 +70,11 @@ class BatteryReading:
     voltage_mv: int | None
     temp_deci_c: int | None
     charge_counter_uah: int | None
+    status: int | None
+    plugged: int | None
+    ac_powered: int | None
+    usb_powered: int | None
+    wireless_powered: int | None
     raw_updates_stopped: bool
 
 
@@ -78,7 +84,24 @@ _BATT_KV = {
     "voltage": re.compile(r"^\s*voltage:\s*(\d+)\s*$", re.MULTILINE),
     "temperature": re.compile(r"^\s*temperature:\s*(\d+)\s*$", re.MULTILINE),
     "charge_counter": re.compile(r"^\s*Charge counter:\s*(\d+)\s*$", re.MULTILINE),
+    "status": re.compile(r"^\s*status:\s*(\d+)\s*$", re.MULTILINE),
+    "plugged": re.compile(r"^\s*plugged:\s*(\d+)\s*$", re.MULTILINE),
+    "ac_powered": re.compile(r"^\s*AC powered:\s*(true|false)\s*$", re.MULTILINE | re.IGNORECASE),
+    "usb_powered": re.compile(r"^\s*USB powered:\s*(true|false)\s*$", re.MULTILINE | re.IGNORECASE),
+    "wireless_powered": re.compile(r"^\s*Wireless powered:\s*(true|false)\s*$", re.MULTILINE | re.IGNORECASE),
 }
+
+
+def _parse_bool_as_int(regex: re.Pattern[str], text: str) -> int | None:
+    m = regex.search(text)
+    if not m:
+        return None
+    v = (m.group(1) or "").strip().lower()
+    if v == "true":
+        return 1
+    if v == "false":
+        return 0
+    return None
 
 
 @dataclass
@@ -163,6 +186,191 @@ def _list_devices(adb: str, timeout_s: float) -> list[tuple[str, str]]:
     return devices
 
 
+def _sanitize_key(s: str) -> str:
+    s = re.sub(r"[^a-zA-Z0-9]+", "_", str(s).strip())
+    s = re.sub(r"_+", "_", s).strip("_")
+    return s.lower() if s else "x"
+
+
+def _sha1_text(text: str) -> str:
+    # Keep it stable but avoid pathological memory on huge dumps.
+    # dumpsys outputs are usually small; 256KB is plenty for change detection.
+    data = text.encode("utf-8", errors="replace")
+    if len(data) > 256 * 1024:
+        data = data[: 256 * 1024]
+    return hashlib.sha1(data).hexdigest()
+
+
+_RE_BOOL = re.compile(r"\b(true|false)\b", re.IGNORECASE)
+_RE_POWER_KV_BOOL = {
+    "is_powered": re.compile(r"^\s*mIsPowered=(true|false)\s*$", re.MULTILINE),
+    "device_idle": re.compile(r"^\s*mDeviceIdleMode=(true|false)\s*$", re.MULTILINE),
+    "light_device_idle": re.compile(r"^\s*mLightDeviceIdleMode=(true|false)\s*$", re.MULTILINE),
+    "hal_interactive": re.compile(r"^\s*mHalInteractiveModeEnabled=(true|false)\s*$", re.MULTILINE),
+}
+_RE_POWER_PLUGTYPE = re.compile(r"^\s*mPlugType=(\d+)\s*$", re.MULTILINE)
+_RE_POWER_WAKEFULNESS = re.compile(r"^\s*mWakefulness=(\S+)\s*$", re.MULTILINE)
+
+_RE_SCHEDBOOST_NORMAL = re.compile(r"^\s*currently isNormalPolicy:\s*(true|false)\s*$", re.MULTILINE)
+_RE_SCHEDBOOST_UCLAMP_EN = re.compile(r"^\s*ENABLE_RTMODE_UCLAMP:\s*(true|false)\s*$", re.MULTILINE)
+_RE_SCHEDBOOST_UCLAMP_MIN = re.compile(r"^\s*TASK_UCLAMP_MIN:\s*(\d+)\s*$", re.MULTILINE)
+_RE_SCHEDBOOST_PREBOOST = re.compile(r"^\s*mPreBoostProcessName:\s*(\S+)\s*$", re.MULTILINE)
+
+_RE_WSTONE_AUTOSAVE = re.compile(r"^\s*Global autosave flag:(\d+)\s*$", re.MULTILINE)
+_RE_WSTONE_CURRENT_MODE = re.compile(
+    r"^>\[(?P<mode>[^\]\s]+)\s+(?P<mode_id>\d+)\]\[(?P<autosave>[^\]]+)\]:Stay for (?P<stay_ms>\d+) ms\((?P<count>\d+) times, average current: (?P<avg_ma>[-]?\d+) mA\)\s*$",
+    re.MULTILINE,
+)
+
+_RE_PH_PREFERRED_RATE = re.compile(r"^\s*HintSessionPreferredRate:\s*(\d+)\s*$", re.MULTILINE)
+_RE_PH_HAL_SUPPORT = re.compile(r"^\s*HAL Support:\s*(true|false)\s*$", re.MULTILINE)
+_RE_PH_SESSION_PID = re.compile(r"^\s*SessionPID:\s*(\d+)\s*$", re.MULTILINE)
+_RE_PH_SESSION_UID = re.compile(r"^\s*SessionUID:\s*(\d+)\s*$", re.MULTILINE)
+
+
+def _parse_bool01(maybe_bool: str | None) -> int | str:
+    if maybe_bool is None:
+        return ""
+    v = maybe_bool.strip().lower()
+    if v == "true":
+        return 1
+    if v == "false":
+        return 0
+    return ""
+
+
+def _parse_dumpsys_policy_service(service: str, text: str) -> dict[str, object]:
+    """Extract a small, stable subset of *explicit* policy state from selected services.
+
+    Goal: a non-guess, low-overhead way to read vendor/framework policy knobs/states.
+    """
+    svc = service.strip()
+    key = _sanitize_key(svc)
+    prefix = f"policy_{key}_"
+
+    out: dict[str, object] = {}
+
+    if svc == "SchedBoostService":
+        m0 = _RE_SCHEDBOOST_NORMAL.search(text)
+        out[prefix + "is_normal_policy"] = _parse_bool01(m0.group(1) if m0 else None)
+        m1 = _RE_SCHEDBOOST_UCLAMP_EN.search(text)
+        out[prefix + "rtmode_uclamp_enabled"] = _parse_bool01(m1.group(1) if m1 else None)
+        mins = [int(m.group(1)) for m in _RE_SCHEDBOOST_UCLAMP_MIN.finditer(text) if m.group(1).isdigit()]
+        out[prefix + "task_uclamp_min_a"] = mins[0] if len(mins) >= 1 else ""
+        out[prefix + "task_uclamp_min_b"] = mins[1] if len(mins) >= 2 else ""
+        m = _RE_SCHEDBOOST_PREBOOST.search(text)
+        out[prefix + "preboost_process"] = m.group(1).strip() if m else ""
+
+        # Count list lengths for stability.
+        always_rt = 0
+        boosting = 0
+        lines = text.splitlines()
+        for i, ln in enumerate(lines):
+            if ln.strip() == "AlwaysRtTids:":
+                j = i + 1
+                while j < len(lines):
+                    s = lines[j].strip()
+                    if not s:
+                        break
+                    if s.isdigit():
+                        always_rt += 1
+                    j += 1
+            if ln.strip() == "Boosting Threads:":
+                j = i + 1
+                while j < len(lines):
+                    s = lines[j].strip()
+                    if not s:
+                        break
+                    boosting += 1
+                    j += 1
+        out[prefix + "always_rt_tids_count"] = always_rt if always_rt > 0 else ""
+        out[prefix + "boosting_threads_count"] = boosting if boosting > 0 else ""
+
+    elif svc == "miui.whetstone.power":
+        m = _RE_WSTONE_AUTOSAVE.search(text)
+        out[prefix + "global_autosave_flag"] = int(m.group(1)) if m and m.group(1).isdigit() else ""
+        m2 = _RE_WSTONE_CURRENT_MODE.search(text)
+        if m2:
+            out[prefix + "mode"] = m2.group("mode")
+            out[prefix + "mode_id"] = int(m2.group("mode_id")) if m2.group("mode_id").isdigit() else ""
+            out[prefix + "autosave"] = m2.group("autosave")
+            out[prefix + "stay_ms"] = int(m2.group("stay_ms")) if m2.group("stay_ms").isdigit() else ""
+            out[prefix + "stay_count"] = int(m2.group("count")) if m2.group("count").isdigit() else ""
+            try:
+                out[prefix + "avg_current_ma"] = int(m2.group("avg_ma"))
+            except Exception:
+                out[prefix + "avg_current_ma"] = ""
+
+    elif svc == "performance_hint":
+        m = _RE_PH_PREFERRED_RATE.search(text)
+        out[prefix + "preferred_rate_ns"] = int(m.group(1)) if m and m.group(1).isdigit() else ""
+        m = _RE_PH_HAL_SUPPORT.search(text)
+        out[prefix + "hal_support"] = _parse_bool01(m.group(1) if m else None)
+        pids = [int(m.group(1)) for m in _RE_PH_SESSION_PID.finditer(text) if m.group(1).isdigit()]
+        uids = [int(m.group(1)) for m in _RE_PH_SESSION_UID.finditer(text) if m.group(1).isdigit()]
+        out[prefix + "active_sessions_count"] = len(pids) if pids else ""
+        # Best-effort: first session identifiers.
+        out[prefix + "session_pid_0"] = pids[0] if pids else ""
+        out[prefix + "session_uid_0"] = uids[0] if uids else ""
+
+    elif svc == "power":
+        # Framework power manager state (no vendor guessing)
+        for k, rgx in _RE_POWER_KV_BOOL.items():
+            m = rgx.search(text)
+            out[prefix + k] = _parse_bool01(m.group(1) if m else None)
+        m = _RE_POWER_PLUGTYPE.search(text)
+        out[prefix + "plug_type"] = int(m.group(1)) if m and m.group(1).isdigit() else ""
+        m = _RE_POWER_WAKEFULNESS.search(text)
+        out[prefix + "wakefulness"] = m.group(1).strip() if m else ""
+
+    return out
+
+
+def _policy_service_columns(service: str) -> list[str]:
+    svc = service.strip()
+    key = _sanitize_key(svc)
+    prefix = f"policy_{key}_"
+    base = [prefix + "rc", prefix + "sha1"]
+    if svc == "SchedBoostService":
+        return base + [
+            prefix + "is_normal_policy",
+            prefix + "rtmode_uclamp_enabled",
+            prefix + "task_uclamp_min_a",
+            prefix + "task_uclamp_min_b",
+            prefix + "preboost_process",
+            prefix + "always_rt_tids_count",
+            prefix + "boosting_threads_count",
+        ]
+    if svc == "miui.whetstone.power":
+        return base + [
+            prefix + "global_autosave_flag",
+            prefix + "mode",
+            prefix + "mode_id",
+            prefix + "autosave",
+            prefix + "stay_ms",
+            prefix + "stay_count",
+            prefix + "avg_current_ma",
+        ]
+    if svc == "performance_hint":
+        return base + [
+            prefix + "preferred_rate_ns",
+            prefix + "hal_support",
+            prefix + "active_sessions_count",
+            prefix + "session_pid_0",
+            prefix + "session_uid_0",
+        ]
+    if svc == "power":
+        return base + [
+            prefix + "is_powered",
+            prefix + "plug_type",
+            prefix + "wakefulness",
+            prefix + "device_idle",
+            prefix + "light_device_idle",
+            prefix + "hal_interactive",
+        ]
+    return base
+
+
 def _pick_default_serial(adb: str, timeout_s: float) -> str | None:
     devices = [(s, st) for s, st in _list_devices(adb, timeout_s=timeout_s) if st == "device"]
     if not devices:
@@ -230,6 +438,11 @@ def _read_battery(adb: str, serial: str | None, timeout_s: float, auto_reset: bo
         voltage_mv=_parse_int(_BATT_KV["voltage"], out),
         temp_deci_c=_parse_int(_BATT_KV["temperature"], out),
         charge_counter_uah=_parse_int(_BATT_KV["charge_counter"], out),
+        status=_parse_int(_BATT_KV["status"], out),
+        plugged=_parse_int(_BATT_KV["plugged"], out),
+        ac_powered=_parse_bool_as_int(_BATT_KV["ac_powered"], out),
+        usb_powered=_parse_bool_as_int(_BATT_KV["usb_powered"], out),
+        wireless_powered=_parse_bool_as_int(_BATT_KV["wireless_powered"], out),
         raw_updates_stopped=updates_stopped,
     )
 
@@ -321,6 +534,68 @@ def _read_time_in_state(adb: str, serial: str | None, policy: int, timeout_s: fl
             continue
         times[freq] = t
     return times
+
+
+def _read_policy_knobs(
+    adb: str,
+    serial: str | None,
+    policies: list[int],
+    timeout_s: float,
+) -> dict[str, str]:
+    """Best-effort read of policy/scheduler knobs (no root required on many builds).
+
+    This is for *detecting* policy changes (boost / min-freq pin / cpuset changes), not for direct power.
+    We intentionally do a single adb shell to keep overhead low.
+    """
+    base = ["-s", serial] if serial else []
+
+    # key -> path (or special marker)
+    items: list[tuple[str, str]] = []
+    items.append(("cpu_online", "/sys/devices/system/cpu/online"))
+
+    for p in policies:
+        items.append((f"cpu_p{p}_scaling_min_freq", f"/sys/devices/system/cpu/cpufreq/policy{p}/scaling_min_freq"))
+        items.append((f"cpu_p{p}_scaling_max_freq", f"/sys/devices/system/cpu/cpufreq/policy{p}/scaling_max_freq"))
+        items.append((f"cpu_p{p}_scaling_governor", f"/sys/devices/system/cpu/cpufreq/policy{p}/scaling_governor"))
+
+    # Common cpuset groups (existence varies by ROM / cgroup version)
+    items.extend(
+        [
+            ("cpuset_top_app", "/dev/cpuset/top-app/cpus"),
+            ("cpuset_foreground", "/dev/cpuset/foreground/cpus"),
+            ("cpuset_background", "/dev/cpuset/background/cpus"),
+            ("cpuset_system_background", "/dev/cpuset/system-background/cpus"),
+        ]
+    )
+
+    # Common uclamp knobs (vendor dependent)
+    items.extend(
+        [
+            ("uclamp_top_app_max", "/dev/cpuctl/top-app/uclamp.max"),
+            ("uclamp_top_app_min", "/dev/cpuctl/top-app/uclamp.min"),
+            ("uclamp_foreground_max", "/dev/cpuctl/foreground/uclamp.max"),
+            ("uclamp_foreground_min", "/dev/cpuctl/foreground/uclamp.min"),
+        ]
+    )
+
+    # Build a single shell command: echo key=value for each path.
+    parts: list[str] = []
+    for k, path in items:
+        # Use POSIX sh, silence errors, strip newlines.
+        parts.append(f"v=$(cat {path} 2>/dev/null | tr -d '\\r' | tr -d '\\n'); echo {k}=$v")
+    cmd = " ; ".join(parts)
+    rc, out, _ = _run(adb, [*base, "shell", "sh", "-c", cmd], timeout_s=timeout_s)
+    if rc != 0:
+        return {}
+
+    result: dict[str, str] = {}
+    for line in out.splitlines():
+        line = line.strip()
+        if not line or "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        result[k.strip()] = v.strip()
+    return result
 
 
 _RE_THERMAL_STATUS = re.compile(r"^\s*Thermal Status:\s*(\d+)\s*$", re.MULTILINE)
@@ -433,6 +708,46 @@ def main() -> int:
         default=60.0,
         help="Print a progress line every N seconds (0 disables)",
     )
+    parser.add_argument(
+        "--policy-knobs",
+        action="store_true",
+        help=(
+            "Also sample scheduler/power policy knobs (cpufreq min/max/governor, cpu online, cpuset, uclamp) "
+            "to help detect boost/throttle windows. Best-effort and device-dependent."
+        ),
+    )
+    parser.add_argument(
+        "--policy-knobs-period-s",
+        type=float,
+        default=0.0,
+        help=(
+            "If --policy-knobs is enabled, sample knobs at most once per this period (seconds) and reuse the last values "
+            "for intermediate rows. Use this to reduce overhead (default: 0 = every sample)."
+        ),
+    )
+    parser.add_argument(
+        "--policy-services",
+        default="",
+        help=(
+            "Comma-separated dumpsys services to sample for explicit policy state (e.g. "
+            "SchedBoostService,miui.whetstone.power,performance_hint,power). "
+            "Use with --policy-services-period-s to reduce overhead."
+        ),
+    )
+    parser.add_argument(
+        "--policy-services-period-s",
+        type=float,
+        default=30.0,
+        help=(
+            "If --policy-services is set, sample these services at most once per this period (seconds) and reuse the last values."
+        ),
+    )
+    parser.add_argument(
+        "--policy-services-timeout-s",
+        type=float,
+        default=8.0,
+        help="Per-service dumpsys timeout (seconds) when --policy-services is enabled.",
+    )
     args = parser.parse_args()
 
     adb = _resolve_adb(args.adb)
@@ -487,6 +802,11 @@ def main() -> int:
         "note",
         "battery_level",
         "battery_scale",
+        "battery_status",
+        "battery_plugged",
+        "battery_ac_powered",
+        "battery_usb_powered",
+        "battery_wireless_powered",
         "battery_voltage_mv",
         "battery_temp_deciC",
         "charge_counter_uAh",
@@ -494,6 +814,36 @@ def main() -> int:
         "battery_updates_stopped",
         "adb_error",
     ]
+
+    if args.policy_knobs:
+        fixed_cols.append("cpu_online")
+        fixed_cols.extend(
+            [
+                "cpuset_top_app",
+                "cpuset_foreground",
+                "cpuset_background",
+                "cpuset_system_background",
+                "uclamp_top_app_max",
+                "uclamp_top_app_min",
+                "uclamp_foreground_max",
+                "uclamp_foreground_min",
+            ]
+        )
+        for p in policies:
+            fixed_cols.extend(
+                [
+                    f"cpu_p{p}_scaling_min_freq_khz",
+                    f"cpu_p{p}_scaling_max_freq_khz",
+                    f"cpu_p{p}_scaling_governor",
+                ]
+            )
+
+    policy_services: list[str] = []
+    if str(args.policy_services).strip():
+        policy_services = [s.strip() for s in str(args.policy_services).split(",") if s.strip()]
+        # Add stable columns up-front.
+        for svc in policy_services:
+            fixed_cols.extend(_policy_service_columns(svc))
 
     if args.batteryproperties:
         fixed_cols.extend(
@@ -522,6 +872,10 @@ def main() -> int:
 
         seq = 0
         last_log_t = 0.0
+        last_knobs: dict[str, str] = {}
+        last_knobs_t = 0.0
+        last_policy_services: dict[str, object] = {}
+        last_policy_services_t = 0.0
         if args.log_every and args.log_every > 0:
             print(f"Sampling -> {out_path} (interval={args.interval}s, duration={args.duration}s)")
         while time.time() < t_end:
@@ -538,6 +892,11 @@ def main() -> int:
                 batt = _read_battery(adb, args.serial, timeout_s=8.0, auto_reset=args.auto_reset_battery)
                 row["battery_level"] = batt.level
                 row["battery_scale"] = batt.scale
+                row["battery_status"] = batt.status
+                row["battery_plugged"] = batt.plugged
+                row["battery_ac_powered"] = batt.ac_powered
+                row["battery_usb_powered"] = batt.usb_powered
+                row["battery_wireless_powered"] = batt.wireless_powered
                 row["battery_voltage_mv"] = batt.voltage_mv
                 row["battery_temp_deciC"] = batt.temp_deci_c
                 row["charge_counter_uAh"] = batt.charge_counter_uah
@@ -558,6 +917,66 @@ def main() -> int:
                 if args.thermal:
                     therm = _read_thermalservice(adb, args.serial, timeout_s=8.0, want_names=want_thermal_names)
                     for k, v in therm.items():
+                        if k in row:
+                            row[k] = v
+
+                if args.policy_knobs:
+                    # Throttle knob sampling to reduce ADB overhead.
+                    now_t = time.time()
+                    period = float(args.policy_knobs_period_s or 0.0)
+                    do_read = (period <= 0.0) or (last_knobs_t <= 0.0) or ((now_t - last_knobs_t) >= period)
+                    if do_read:
+                        last_knobs = _read_policy_knobs(adb, args.serial, policies=policies, timeout_s=6.0)
+                        last_knobs_t = now_t
+                    knobs = last_knobs
+                    # Copy known keys. Missing keys remain empty.
+                    row["cpu_online"] = knobs.get("cpu_online", "")
+                    for k in [
+                        "cpuset_top_app",
+                        "cpuset_foreground",
+                        "cpuset_background",
+                        "cpuset_system_background",
+                        "uclamp_top_app_max",
+                        "uclamp_top_app_min",
+                        "uclamp_foreground_max",
+                        "uclamp_foreground_min",
+                    ]:
+                        if k in row:
+                            row[k] = knobs.get(k, "")
+                    for p in policies:
+                        mn = knobs.get(f"cpu_p{p}_scaling_min_freq", "")
+                        mx = knobs.get(f"cpu_p{p}_scaling_max_freq", "")
+                        gov = knobs.get(f"cpu_p{p}_scaling_governor", "")
+                        row[f"cpu_p{p}_scaling_min_freq_khz"] = mn
+                        row[f"cpu_p{p}_scaling_max_freq_khz"] = mx
+                        row[f"cpu_p{p}_scaling_governor"] = gov
+
+                if policy_services:
+                    now_t = time.time()
+                    period = float(args.policy_services_period_s or 0.0)
+                    do_read = (period <= 0.0) or (last_policy_services_t <= 0.0) or ((now_t - last_policy_services_t) >= period)
+                    if do_read:
+                        base = ["-s", args.serial] if args.serial else []
+                        merged: dict[str, object] = {}
+                        for svc in policy_services:
+                            key = _sanitize_key(svc)
+                            prefix = f"policy_{key}_"
+                            try:
+                                rc, out, err = _run(
+                                    adb,
+                                    [*base, "shell", "dumpsys", svc],
+                                    timeout_s=float(args.policy_services_timeout_s),
+                                )
+                                text = out + ("\n" + err if err else "")
+                                merged[prefix + "rc"] = rc
+                                merged[prefix + "sha1"] = _sha1_text(text) if text else ""
+                                merged.update(_parse_dumpsys_policy_service(svc, text))
+                            except Exception:
+                                merged[prefix + "rc"] = ""
+                                merged[prefix + "sha1"] = ""
+                        last_policy_services = merged
+                        last_policy_services_t = now_t
+                    for k, v in last_policy_services.items():
                         if k in row:
                             row[k] = v
 

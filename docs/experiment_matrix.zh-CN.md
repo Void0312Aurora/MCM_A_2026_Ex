@@ -148,7 +148,8 @@ v1 目标：用**最小可辨识**的实验集合，完成题目要求的闭环�
 - 采样 + enrich + report（推荐）：
   - `D:/workshop/MP_power/.venv/Scripts/python.exe scripts/pipeline_run.py --scenario <SCENARIO> --duration <SECONDS> --interval 2 --thermal --display --auto-reset-battery --log-every 30`
 - 质量自检（跑完立刻做）：
-  - `D:/workshop/MP_power/.venv/Scripts/python.exe scripts/qc_run.py --csv artifacts/runs/<run>_enriched.csv`
+  - `D:/workshop/MP_power/.venv/Scripts/python.exe qc/qc_run.py --csv artifacts/runs/<run>_enriched.csv`
+  - （可选）如果只想生成报告而不重跑采样：`D:/workshop/MP_power/.venv/Scripts/python.exe scripts/pipeline_run.py --skip-sample --run-csv artifacts/runs/<run>.csv --scenario <label>`
 
 备注：当你怀疑“是否中途熄屏/是否真的保持 ON”时，建议加 `--display`，它会在 CSV 中记录 `display_state`（来自 `dumpsys power`）。
 

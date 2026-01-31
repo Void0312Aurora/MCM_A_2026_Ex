@@ -1,3 +1,0 @@
-run_id,seq,ts_pc,scenario,note,battery_voltage_mv,cpu_p0_freq480000_dt,cpu_p0_freq600000_dt,cpu_energy_mJ,cpu_energy_mJ_matched,cpu_energy_mJ_unmatched
-TEST,0,2026-01-30T00:00:00+08:00,S0,,4000,1000,0,154.080,154.080,0.000
-TEST,1,2026-01-30T00:00:02+08:00,S0,,4000,0,2000,330.560,330.560,0.000

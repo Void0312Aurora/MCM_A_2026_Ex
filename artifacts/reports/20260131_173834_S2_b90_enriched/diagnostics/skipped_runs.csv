@@ -1,2 +1,0 @@
-label,path,rows,duration_s,reason
-S2_b90,artifacts/runs/20260131_173834_S2_b90_enriched.csv,9,28.0,rows<30;duration<60s

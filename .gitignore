@@ -1,1 +1,25 @@
 .venv/
+
+# Python caches
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# Local logs
+*.log
+run.log
+
+# Generated experiment outputs (treat as disposable)
+artifacts/runs/
+artifacts/reports/
+artifacts/plots/
+artifacts/raw/
+artifacts/android/policy_probe/
+
+# Perfetto traces / dumps
+artifacts/**/*.pftrace
+artifacts/**/*.pb
+
+# Device-specific derived tables (regen anytime)
+artifacts/android/power_profile/

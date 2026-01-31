@@ -1,2 +1,0 @@
-label,trace_path,n_samples,duration_s,sample_period_s_median,charge_start_uah,charge_end_uah,discharge_mah,current_ua_mean,current_ua_p50,current_ua_p95,voltage_v_mean,voltage_v_p50,power_mw_mean,energy_mwh
-20260131_174045_S2_b90,artifacts\reports\20260131_174045_S2_b90_enriched\perfetto_android_power.pftrace,2162,540.001299724,0.2500049230000059,1621000.0,1912000.0,-291.0,-1940234.5050878816,-1952000.0,-1803000.0,3.9356480111008323,3.936,-7636.270398704903,-1145.5307810326642

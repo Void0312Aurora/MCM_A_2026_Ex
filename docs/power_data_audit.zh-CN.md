@@ -39,7 +39,7 @@
 
 仓库支持：
 - 采集：`scripts/pipeline_run.py` 增加 `--perfetto-android-power`（与采样并行录制，结束后自动拉取并解析）。
-- 解析：`scripts/parse_perfetto_android_power_counters.py`（输出 timeseries CSV + summary CSV/JSON）。
+- 解析：`python -m mp_power.pipeline_ops parse-perfetto-android-power --trace <trace.pftrace> --out-dir <out_dir>`（输出 timeseries CSV + summary CSV/JSON）。
 
 ### 2.2 热数据（可用于热模型/温度影响）
 
@@ -235,3 +235,41 @@
   - 定义离散模式 $m(t)$（例如 LAUNCH/TOUCH/游戏/导航/视频），模式改变导致 $P_{cpu}$、$P_{gpu}$、$P_{radio}$ 的参数切换
 - 把 displayconfig 的 thermal brightness 用作“热→亮度→功耗”的耦合约束，使模型能解释过热后续航与亮度变化
 - 对不可读 thermal conf：不作为数据源；改用 `dumpsys thermalservice` 的实时观测做验证与不确定性分析
+
+## 10. 非 root “策略/调度事件”如何做到不揣测（新增）
+
+本节目标：尽量找到“系统直接暴露的策略/模式/事件”，而不是只靠推断。
+
+### 10.1 先探测：是否存在可 `dumpsys` 的厂商/策略服务
+
+仓库提供了一键探测脚本：
+
+- 脚本：`policy/probe_policy_interfaces.py`
+- 输出：`artifacts/android/policy_probe/<timestamp>/`（保存 `dumpsys -l`、`service list`、`cmd -l`、候选服务的 `dumpsys <name>` 等）
+
+用法：
+
+- `python policy/probe_policy_interfaces.py`
+- 若有多设备/无线调试：`python policy/probe_policy_interfaces.py --serial <serial>`
+
+说明：
+
+- 若 ROM 暴露了 `dumpsys <vendor_service>`（例如 power/perf/mtk/mi 相关服务），该输出通常能给出比“旋钮推断”更直接的模式/策略信息。
+- 若服务不允许访问，脚本会记录失败原因，但不终止整体探测。
+
+### 10.2 用 Perfetto 抓“策略事件”（可选，非 root）
+
+若你希望看到更接近“策略切换时刻”的证据链，可以让 pipeline 录制包含 `linux.ftrace` + atrace 类别的 Perfetto trace，然后从 trace 的 slices 中提取可能的策略/PowerHAL markers：
+
+- 采集开关：`scripts/pipeline_run.py --perfetto-policy-trace`
+- 解析输出（在 report 目录）：
+  - `perfetto_policy_markers.csv`
+  - `perfetto_policy_markers_summary.json`
+
+示例：
+
+- `python scripts/pipeline_run.py --scenario S2_b90 --duration 540 --interval 2 --perfetto-android-power --perfetto-policy-trace`
+
+备注：
+
+- 是否能抓到“准确策略名”取决于 ROM 是否在 atrace/ftrace 中埋点（有则直接看到；无则只能看到频率/idle/sched 的效果链）。

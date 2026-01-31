@@ -1,3 +1,0 @@
-run_id,seq,ts_pc,scenario,note,battery_voltage_mv,cpu_p0_freq480000_dt,cpu_p0_freq600000_dt
-TEST,0,2026-01-30T00:00:00+08:00,S0,,4000,1000,0
-TEST,1,2026-01-30T00:00:02+08:00,S0,,4000,0,2000

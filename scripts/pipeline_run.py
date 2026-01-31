@@ -6,6 +6,21 @@ import subprocess
 from datetime import datetime
 from pathlib import Path
 
+from _bootstrap import ensure_repo_root_on_sys_path
+
+ensure_repo_root_on_sys_path()
+
+from mp_power.adb import adb_exec_out
+from mp_power.adb import adb_shell
+from mp_power.adb import resolve_adb
+from mp_power.pipeline_ops import enrich_run_with_cpu_energy
+from mp_power.pipeline_ops import parse_perfetto_android_power_counters
+from mp_power.pipeline_ops import parse_perfetto_policy_markers
+from mp_power.pipeline_ops import report_run
+from mp_power.pipeline_ops import write_batterystats_min_summary
+from mp_power.pipeline_ops import parse_power_profile_xmltree
+from mp_power.pipeline_ops import write_power_profile_outputs
+
 
 def _run(cmd: list[str], timeout_s: float | None = None) -> tuple[int, str, str]:
     proc = subprocess.run(
@@ -23,23 +38,6 @@ def _capture_wrote_path(output: str) -> Path | None:
     if not m:
         return None
     return Path(m.group(1).strip())
-
-
-def _adb_shell(adb: str, serial: str | None, args: list[str], timeout_s: float | None = None) -> tuple[int, str, str]:
-    cmd = [adb]
-    if serial:
-        cmd += ["-s", serial]
-    cmd += ["shell", *args]
-    return _run(cmd, timeout_s=timeout_s)
-
-
-def _adb_exec_out(adb: str, serial: str | None, args: list[str], timeout_s: float | None = None) -> tuple[int, bytes, str]:
-    cmd = [adb]
-    if serial:
-        cmd += ["-s", serial]
-    cmd += ["exec-out", *args]
-    proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout_s)
-    return proc.returncode, proc.stdout, proc.stderr.decode("utf-8", errors="replace")
 
 
 _RE_BS_GLOBAL = re.compile(r"^\s*Global\s*$", re.MULTILINE)
@@ -92,6 +90,32 @@ def main() -> int:
         help="Also sample dumpsys batteryproperties (current_now/current_average/energy_counter if available)",
     )
     parser.add_argument(
+        "--policy-knobs",
+        action="store_true",
+        help="Also sample policy knobs (cpufreq min/max/governor, cpuset, uclamp) to detect boost/throttle windows.",
+    )
+    parser.add_argument(
+        "--policy-knobs-period-s",
+        type=float,
+        default=0.0,
+        help="If --policy-knobs, sample knobs at most once per this period (seconds) and reuse last values (default: 0 = every sample).",
+    )
+    parser.add_argument(
+        "--policy-services",
+        default="",
+        help=(
+            "Comma-separated dumpsys services to sample for explicit policy state (e.g. "
+            "SchedBoostService,miui.whetstone.power,performance_hint,power). "
+            "This is a non-guess signal source; sample rate controlled by --policy-services-period-s."
+        ),
+    )
+    parser.add_argument(
+        "--policy-services-period-s",
+        type=float,
+        default=30.0,
+        help="If --policy-services, sample services at most once per this period (seconds) and reuse last values.",
+    )
+    parser.add_argument(
         "--batterystats-usage",
         action="store_true",
         help="Use `dumpsys batterystats --usage --model power-profile` as a stable short-window energy estimate: reset before sampling and dump after.",
@@ -125,6 +149,20 @@ def main() -> int:
         default=250,
         help="Perfetto android.power battery polling period (ms).",
     )
+    parser.add_argument(
+        "--perfetto-policy-trace",
+        action="store_true",
+        help=(
+            "Also record a Perfetto trace with linux.ftrace + atrace categories to detect policy/scheduler events "
+            "(cpu_frequency/cpu_idle/sched + optional vendor atrace markers). "
+            "Produces a best-effort policy markers CSV from slices." 
+        ),
+    )
+    parser.add_argument(
+        "--perfetto-policy-atrace-categories",
+        default="power,sched,freq,idle,thermal,am,wm",
+        help="Comma-separated atrace categories to enable when --perfetto-policy-trace.",
+    )
     parser.add_argument("--auto-reset-battery", action="store_true")
     parser.add_argument("--log-every", type=float, default=60.0, help="Sampler progress log period seconds")
     parser.add_argument(
@@ -155,17 +193,28 @@ def main() -> int:
 
         py = sys.executable
 
-    # 1) Ensure power_profile parsed
-    if not (args.profile_out_dir / "power_profile.json").exists():
-        cmd = [py, "scripts/parse_power_profile_overlay.py", str(args.xmltree), "--out-dir", str(args.profile_out_dir)]
-        rc, out, err = _run(cmd)
-        if rc != 0:
-            raise SystemExit(f"parse_power_profile_overlay failed: {err or out}")
+    # 1) Ensure power_profile parsed (and includes optional items_ma for screen estimate)
+    pp_json = args.profile_out_dir / "power_profile.json"
+    need_parse = not pp_json.exists()
+    if not need_parse:
+        try:
+            txt = pp_json.read_text(encoding="utf-8", errors="replace")
+            if '"items_ma"' not in txt:
+                need_parse = True
+        except Exception:
+            need_parse = True
+
+    if need_parse:
+        try:
+            profile = parse_power_profile_xmltree(args.xmltree)
+            write_power_profile_outputs(profile, args.profile_out_dir)
+        except Exception as e:
+            raise SystemExit(f"parse_power_profile_overlay failed: {e}")
 
     # 2) Ensure policy mapping
     if not args.map_json.exists():
         # map_policy_to_cluster expects an adb path; if not provided, hope it's on PATH.
-        map_cmd = [py, "scripts/map_policy_to_cluster.py"]
+        map_cmd = [py, "policy/map_policy_to_cluster.py"]
         if args.adb:
             map_cmd += ["--adb", args.adb]
         if args.serial:
@@ -189,14 +238,15 @@ def main() -> int:
         report_dir = Path("artifacts") / "reports" / f"{run_id}_{args.scenario}_enriched"
         report_dir.mkdir(parents=True, exist_ok=True)
 
-        # Optional: Perfetto android.power battery counters trace (run in parallel with sampling).
-        adb_path = args.adb or "adb"
+        # Optional: Perfetto trace(s) (run in parallel with sampling).
+        adb_path = resolve_adb(args.adb)
         perfetto_proc: subprocess.Popen[bytes] | None = None
         perfetto_remote_cfg: str | None = None
         perfetto_remote_out: str | None = None
         perfetto_local_trace: Path | None = None
 
-        if args.perfetto_android_power:
+        want_perfetto = bool(args.perfetto_android_power or args.perfetto_policy_trace)
+        if want_perfetto:
             if not args.serial:
                 # Keep behavior consistent with other adb operations: if not provided, let adb decide.
                 # However, perfetto tracing is critical enough that we require explicit serial if multiple devices.
@@ -204,34 +254,52 @@ def main() -> int:
 
             duration_ms = int(round(float(args.duration) * 1000.0))
             poll_ms = int(args.perfetto_battery_poll_ms)
-            if poll_ms <= 0:
+            if args.perfetto_android_power and poll_ms <= 0:
                 raise SystemExit("--perfetto-battery-poll-ms must be > 0")
 
             # Write pbtxt locally for audit/repro, but DO NOT push to device.
             # Some devices enforce SELinux rules that prevent the perfetto process from opening
             # config files under /data/local/tmp (errno=13). Feeding config via stdin avoids this.
-            cfg_text = (
-                "\n".join(
-                    [
-                        f"duration_ms: {duration_ms}",
-                        "buffers: {\n  size_kb: 2048\n  fill_policy: RING_BUFFER\n}",
-                        "data_sources: {\n  config {\n    name: \"android.power\"\n    android_power_config {",
-                        f"      battery_poll_ms: {poll_ms}",
-                        # NOTE: Field name is 'battery_counters' (not 'counters') in AndroidPowerConfig.
-                        "      battery_counters: BATTERY_COUNTER_CAPACITY_PERCENT",
-                        "      battery_counters: BATTERY_COUNTER_CHARGE",
-                        "      battery_counters: BATTERY_COUNTER_CURRENT",
-                        "      battery_counters: BATTERY_COUNTER_VOLTAGE",
-                        "    }\n  }\n}",
-                    ]
-                )
-                + "\n"
-            )
-            local_cfg = report_dir / "perfetto_android_power.pbtxt"
+            cfg_lines: list[str] = []
+            cfg_lines.append(f"duration_ms: {duration_ms}")
+            # Slightly larger buffer helps when enabling ftrace.
+            cfg_lines.append("buffers: {\n  size_kb: 8192\n  fill_policy: RING_BUFFER\n}")
+
+            if args.perfetto_android_power:
+                cfg_lines.append("data_sources: {\n  config {\n    name: \"android.power\"\n    android_power_config {")
+                cfg_lines.append(f"      battery_poll_ms: {poll_ms}")
+                # NOTE: Field name is 'battery_counters' (not 'counters') in AndroidPowerConfig.
+                cfg_lines.append("      battery_counters: BATTERY_COUNTER_CAPACITY_PERCENT")
+                cfg_lines.append("      battery_counters: BATTERY_COUNTER_CHARGE")
+                cfg_lines.append("      battery_counters: BATTERY_COUNTER_CURRENT")
+                cfg_lines.append("      battery_counters: BATTERY_COUNTER_VOLTAGE")
+                cfg_lines.append("    }\n  }\n}")
+
+            if args.perfetto_policy_trace:
+                cats = [c.strip() for c in str(args.perfetto_policy_atrace_categories).split(",") if c.strip()]
+                cfg_lines.append("data_sources: {\n  config {\n    name: \"linux.ftrace\"\n    ftrace_config {")
+                # Core events for frequency/idle/scheduler changes.
+                for ev in [
+                    "power/cpu_frequency",
+                    "power/cpu_idle",
+                    "sched/sched_switch",
+                    "sched/sched_wakeup",
+                    "sched/sched_wakeup_new",
+                ]:
+                    cfg_lines.append(f"      ftrace_events: \"{ev}\"")
+                # Atrace categories (if supported) sometimes expose PowerHAL / vendor markers.
+                for cat in cats:
+                    cfg_lines.append(f"      atrace_categories: \"{cat}\"")
+                cfg_lines.append('      atrace_apps: "*"')
+                cfg_lines.append("    }\n  }\n}")
+
+            cfg_text = "\n".join(cfg_lines) + "\n"
+
+            local_cfg = report_dir / "perfetto_trace.pbtxt"
             local_cfg.write_text(cfg_text, encoding="utf-8")
 
             perfetto_remote_cfg = None
-            perfetto_remote_out = f"/data/misc/perfetto-traces/mp_power_android_power_{run_id}_{args.scenario}.pftrace"
+            perfetto_remote_out = f"/data/misc/perfetto-traces/mp_power_trace_{run_id}_{args.scenario}.pftrace"
 
             # Start perfetto in parallel.
             perfetto_cmd = [adb_path]
@@ -262,21 +330,19 @@ def main() -> int:
         bs_end_pb: Path | None = None
         if args.batterystats_proto:
             if args.batterystats_proto_reset:
-                rc, out, err = _adb_shell(adb_path, args.serial, ["dumpsys", "batterystats", "--reset"], timeout_s=20.0)
+                rc, out, err = adb_shell(adb_path, args.serial, ["dumpsys", "batterystats", "--reset"], timeout_s=20.0)
                 if rc != 0:
                     raise SystemExit(f"batterystats --reset failed: {err or out}")
 
             bs_start_pb = report_dir / "batterystats_start.pb"
-            rc, blob, err = _adb_exec_out(adb_path, args.serial, ["dumpsys", "batterystats", "--proto"], timeout_s=30.0)
+            rc, blob, err = adb_exec_out(adb_path, args.serial, ["dumpsys", "batterystats", "--proto"], timeout_s=30.0)
             if rc != 0:
                 raise SystemExit(f"batterystats --proto (start) failed: {err}")
             bs_start_pb.write_bytes(blob)
 
         # Optional: reset batterystats so the subsequent --usage dump represents only this run window.
         if args.batterystats_usage:
-            # If adb not provided, assume on PATH.
-            adb_path = args.adb or "adb"
-            rc, out, err = _adb_shell(adb_path, args.serial, ["dumpsys", "batterystats", "--reset"], timeout_s=20.0)
+            rc, out, err = adb_shell(adb_path, args.serial, ["dumpsys", "batterystats", "--reset"], timeout_s=20.0)
             if rc != 0:
                 raise SystemExit(f"batterystats --reset failed: {err or out}")
 
@@ -304,6 +370,15 @@ def main() -> int:
             sample_cmd += ["--display"]
         if args.batteryproperties:
             sample_cmd += ["--batteryproperties"]
+        if args.policy_knobs:
+            sample_cmd += ["--policy-knobs"]
+            if args.policy_knobs_period_s and float(args.policy_knobs_period_s) > 0:
+                sample_cmd += ["--policy-knobs-period-s", str(args.policy_knobs_period_s)]
+
+        if str(getattr(args, "policy_services", "")).strip():
+            sample_cmd += ["--policy-services", str(args.policy_services)]
+            if args.policy_services_period_s and float(args.policy_services_period_s) > 0:
+                sample_cmd += ["--policy-services-period-s", str(args.policy_services_period_s)]
         if args.auto_reset_battery:
             sample_cmd += ["--auto-reset-battery"]
 
@@ -313,7 +388,7 @@ def main() -> int:
             raise SystemExit(f"adb_sample_power failed with code {rc}")
 
         # Wait for perfetto to finish and pull + parse trace.
-        if args.perfetto_android_power:
+        if want_perfetto:
             if perfetto_proc is None or perfetto_remote_out is None:
                 raise SystemExit("perfetto process was not started")
 
@@ -329,52 +404,54 @@ def main() -> int:
                 stderr = stderr_b.decode("utf-8", errors="replace") if stderr_b else ""
                 raise SystemExit(f"perfetto failed (exit={perfetto_proc.returncode}): {stderr or stdout}")
 
-            perfetto_local_trace = report_dir / "perfetto_android_power.pftrace"
-            rc, blob, err = _adb_exec_out(adb_path, args.serial, ["cat", perfetto_remote_out], timeout_s=30.0)
+            perfetto_local_trace = report_dir / "perfetto_trace.pftrace"
+            rc, blob, err = adb_exec_out(adb_path, args.serial, ["cat", perfetto_remote_out], timeout_s=30.0)
             if rc != 0:
                 raise SystemExit(f"failed to pull perfetto trace via exec-out: {err}")
             perfetto_local_trace.write_bytes(blob)
             if perfetto_local_trace.stat().st_size == 0:
                 raise SystemExit("perfetto trace is empty")
 
-            # Parse battery counters into CSV/JSON.
-            parse_cmd = [
-                py,
-                "scripts/parse_perfetto_android_power_counters.py",
-                "--trace",
-                str(perfetto_local_trace),
-                "--out-dir",
-                str(report_dir),
-                "--label",
-                f"{run_id}_{args.scenario}",
-            ]
-            rc, out, err = _run(parse_cmd)
-            if rc != 0:
-                raise SystemExit(f"parse_perfetto_android_power_counters failed: {err or out}")
+            if args.perfetto_android_power:
+                try:
+                    parse_perfetto_android_power_counters(
+                        perfetto_local_trace,
+                        out_dir=report_dir,
+                        label=f"{run_id}_{args.scenario}",
+                        no_timeseries=False,
+                    )
+                except Exception as e:
+                    raise SystemExit(f"parse_perfetto_android_power_counters failed: {e}")
+
+            if args.perfetto_policy_trace:
+                try:
+                    parse_perfetto_policy_markers(perfetto_local_trace, out_dir=report_dir)
+                except Exception as e:
+                    raise SystemExit(f"parse_perfetto_policy_markers failed: {e}")
 
             # Best-effort cleanup.
-            _adb_shell(adb_path, args.serial, ["rm", "-f", perfetto_remote_out], timeout_s=10.0)
+            adb_shell(adb_path, args.serial, ["rm", "-f", perfetto_remote_out], timeout_s=10.0)
 
         # Capture END proto after sampling (before enrich/report is fine).
         if args.batterystats_proto:
             bs_end_pb = report_dir / "batterystats_end.pb"
-            rc, blob, err = _adb_exec_out(adb_path, args.serial, ["dumpsys", "batterystats", "--proto"], timeout_s=30.0)
+            rc, blob, err = adb_exec_out(adb_path, args.serial, ["dumpsys", "batterystats", "--proto"], timeout_s=30.0)
             if rc != 0:
                 raise SystemExit(f"batterystats --proto (end) failed: {err}")
             bs_end_pb.write_bytes(blob)
 
     # 4) Enrich
     enriched_csv = run_csv.with_name(run_csv.stem + "_enriched.csv")
-    enrich_cmd = [py, "scripts/enrich_run_with_cpu_energy.py", "--run-csv", str(run_csv), "--out", str(enriched_csv)]
-    rc, out, err = _run(enrich_cmd)
-    if rc != 0:
-        raise SystemExit(f"enrich_run_with_cpu_energy failed: {err or out}")
+    try:
+        enrich_run_with_cpu_energy(run_csv=run_csv, out_csv=enriched_csv)
+    except Exception as e:
+        raise SystemExit(f"enrich_run_with_cpu_energy failed: {e}")
 
     # 5) Report
-    report_cmd = [py, "scripts/report_run.py", "--csv", str(enriched_csv)]
-    rc, out, err = _run(report_cmd)
-    if rc != 0:
-        raise SystemExit(f"report_run failed: {err or out}")
+    try:
+        report_run(enriched_csv)
+    except Exception as e:
+        raise SystemExit(f"report_run failed: {e}")
 
     # 5.5) Optional: parse batterystats proto (schema-min) into JSON/CSV
     if args.batterystats_proto and not args.skip_sample:
@@ -399,30 +476,23 @@ def main() -> int:
         if start_pb.exists() and end_pb.exists() and end_pb.stat().st_size > 0:
             out_json = report_dir / "batterystats_proto_min_summary.json"
             out_csv = report_dir / "batterystats_proto_min_summary.csv"
-            cmd = [
-                py,
-                "scripts/parse_batterystats_proto_min.py",
-                "--start",
-                str(start_pb),
-                "--end",
-                str(end_pb),
-                "--out-json",
-                str(out_json),
-                "--out-csv",
-                str(out_csv),
-                "--label",
-                args.scenario,
-            ]
-            rc, out, err = _run(cmd)
-            if rc != 0:
-                raise SystemExit(f"parse_batterystats_proto_min failed: {err or out}")
+            try:
+                write_batterystats_min_summary(
+                    start_pb=start_pb,
+                    end_pb=end_pb,
+                    out_json=out_json,
+                    out_csv=out_csv,
+                    label=args.scenario,
+                )
+            except Exception as e:
+                raise SystemExit(f"parse_batterystats_proto_min failed: {e}")
         else:
             print("WARN: batterystats proto dumps missing or empty; skipping proto parse")
 
     # 6) Optional: batterystats usage dump + parsed summary
     if args.batterystats_usage and not args.skip_sample:
-        adb_path = args.adb or "adb"
-        rc, out, err = _adb_shell(
+        adb_path = resolve_adb(args.adb)
+        rc, out, err = adb_shell(
             adb_path,
             args.serial,
             ["dumpsys", "batterystats", "--usage", "--model", "power-profile"],

@@ -5,6 +5,14 @@ import subprocess
 import sys
 from dataclasses import dataclass
 
+from _bootstrap import ensure_repo_root_on_sys_path
+
+ensure_repo_root_on_sys_path()
+
+from mp_power.adb import adb_shell
+from mp_power.adb import resolve_adb
+from mp_power.adb import shell_ok
+
 
 @dataclass
 class BrightnessState:
@@ -13,26 +21,8 @@ class BrightnessState:
     timeout_ms: int | None
 
 
-def _run(adb: str, serial: str | None, args: list[str], timeout_s: float = 8.0) -> tuple[int, str, str]:
-    cmd = [adb]
-    if serial:
-        cmd += ["-s", serial]
-    cmd += ["shell", *args]
-    proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout_s)
-    out = proc.stdout.decode("utf-8", errors="replace")
-    err = proc.stderr.decode("utf-8", errors="replace")
-    return proc.returncode, out, err
-
-
-def _shell_ok(adb: str, serial: str | None, args: list[str], timeout_s: float = 8.0) -> str:
-    rc, out, err = _run(adb, serial, args, timeout_s=timeout_s)
-    if rc != 0:
-        raise RuntimeError((err or out).strip() or f"adb shell failed: {' '.join(args)}")
-    return out
-
-
 def _get_int_setting(adb: str, serial: str | None, namespace: str, key: str) -> int | None:
-    rc, out, _ = _run(adb, serial, ["settings", "get", namespace, key])
+    rc, out, _ = adb_shell(adb, serial, ["settings", "get", namespace, key], timeout_s=8.0)
     if rc != 0:
         return None
     s = out.strip()
@@ -49,11 +39,11 @@ def _ensure_write_settings(adb: str, serial: str | None) -> None:
 
     This is required for `settings put system ...` to succeed on some devices.
     """
-    _shell_ok(adb, serial, ["appops", "set", "com.android.shell", "WRITE_SETTINGS", "allow"], timeout_s=8.0)
+    shell_ok(adb, serial, ["appops", "set", "com.android.shell", "WRITE_SETTINGS", "allow"], timeout_s=8.0)
 
 
 def _set_system_setting(adb: str, serial: str | None, key: str, value: int) -> None:
-    _shell_ok(adb, serial, ["settings", "put", "system", key, str(int(value))], timeout_s=8.0)
+    shell_ok(adb, serial, ["settings", "put", "system", key, str(int(value))], timeout_s=8.0)
 
 
 def read_state(adb: str, serial: str | None) -> BrightnessState:
@@ -72,7 +62,7 @@ def main() -> int:
             "Workflow: set brightness manually on the phone -> run this script -> it auto-names scenario as S2_b<value>."
         )
     )
-    p.add_argument("--adb", default="C:/Users/30483/AppData/Local/Android/Sdk/platform-tools/adb.exe")
+    p.add_argument("--adb", default=None, help="adb path (optional; auto-detect by default)")
     p.add_argument("--serial", default=None)
     p.add_argument("--scenario-prefix", default="S2")
     p.add_argument("--duration", type=float, default=540.0, help="Seconds. Keep <= screen timeout (default 9 min).")
@@ -140,10 +130,12 @@ def main() -> int:
     if args.set_timeout_ms is not None and args.set_timeout_ms <= 0:
         raise SystemExit("--set-timeout-ms must be positive")
 
+    adb = resolve_adb(args.adb)
+
     # Optional: enable WRITE_SETTINGS via AppOps and set parameters programmatically.
     if args.enable_write_settings and (args.set_brightness is not None or args.set_timeout_ms is not None):
         try:
-            _ensure_write_settings(args.adb, args.serial)
+            _ensure_write_settings(adb, args.serial)
         except Exception as e:
             raise SystemExit(
                 "Failed to enable WRITE_SETTINGS via appops. "
@@ -154,8 +146,8 @@ def main() -> int:
     if args.set_brightness is not None:
         try:
             # enforce manual mode for S2
-            _set_system_setting(args.adb, args.serial, "screen_brightness_mode", 0)
-            _set_system_setting(args.adb, args.serial, "screen_brightness", int(args.set_brightness))
+            _set_system_setting(adb, args.serial, "screen_brightness_mode", 0)
+            _set_system_setting(adb, args.serial, "screen_brightness", int(args.set_brightness))
         except Exception as e:
             raise SystemExit(
                 "Failed to set brightness via adb. "
@@ -165,7 +157,7 @@ def main() -> int:
 
     if args.set_timeout_ms is not None:
         try:
-            _set_system_setting(args.adb, args.serial, "screen_off_timeout", int(args.set_timeout_ms))
+            _set_system_setting(adb, args.serial, "screen_off_timeout", int(args.set_timeout_ms))
         except Exception as e:
             raise SystemExit(
                 "Failed to set screen_off_timeout via adb. "
@@ -173,7 +165,7 @@ def main() -> int:
                 f"Details: {e}"
             )
 
-    st = read_state(args.adb, args.serial)
+    st = read_state(adb, args.serial)
     print(f"screen_brightness={st.brightness} (0-255)")
     print(f"screen_brightness_mode={st.mode} (0 manual, 1 auto)")
     print(f"screen_off_timeout_ms={st.timeout_ms}")
@@ -193,7 +185,7 @@ def main() -> int:
         sys.executable,
         "scripts/pipeline_run.py",
         "--adb",
-        args.adb,
+        adb,
         "--scenario",
         scenario,
         "--duration",

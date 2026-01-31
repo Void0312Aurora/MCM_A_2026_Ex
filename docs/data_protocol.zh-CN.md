@@ -104,7 +104,7 @@
 本仓库已提供最小闭环脚本（Windows/PowerShell 下直接运行）。
 
 - 解析 overlay 的 power_profile（生成 cluster 频点-电流表）：
-	- `D:/workshop/MP_power/.venv/Scripts/python.exe scripts/parse_power_profile_overlay.py artifacts/android/overlays/FrameworkResOverlay_power_profile_xmltree.txt`
+	- `D:/workshop/MP_power/.venv/Scripts/python.exe -m mp_power.pipeline_ops parse-power-profile artifacts/android/overlays/FrameworkResOverlay_power_profile_xmltree.txt`
 	- 产物输出到：`artifacts/android/power_profile/`（含 `clusterX_freq_power.csv` 与 `power_profile.json`）
 
 - ADB 连续采样写入 CSV（带“假断电/断连”容错：写 `adb_error` 列不中断进程）：
@@ -114,18 +114,18 @@
 	- 可选采集热传感器：追加 `--thermal`（会增加 `thermal_status` 与 `thermal_<name>_C` 列）
 
 - 自动推断 cpufreq policy → power_profile cluster 映射（用于后续批量算能耗列）：
-	- `D:/workshop/MP_power/.venv/Scripts/python.exe scripts/map_policy_to_cluster.py --serial <serial>`
+	- `D:/workshop/MP_power/.venv/Scripts/python.exe policy/map_policy_to_cluster.py --serial <serial>`
 	- 产物输出到：`artifacts/android/power_profile/policy_cluster_map.json`
 
 - 基于 mapping + power_profile 批量给采样 CSV 增加 CPU 能耗列（每个 policy + 总和）：
-	- `D:/workshop/MP_power/.venv/Scripts/python.exe scripts/enrich_run_with_cpu_energy.py --run-csv artifacts/runs/<run.csv> --out artifacts/runs/<run_enriched.csv>`
+	- `D:/workshop/MP_power/.venv/Scripts/python.exe -m mp_power.pipeline_ops enrich --run-csv artifacts/runs/<run.csv> --out artifacts/runs/<run_enriched.csv>`
 
 - 固定流水线（一条命令串起：采样→能耗列→报告图表）：
 	- `D:/workshop/MP_power/.venv/Scripts/python.exe scripts/pipeline_run.py --scenario S1 --duration 1200 --interval 2 --thermal --auto-reset-battery`
 	- 输出：`artifacts/runs/<run>_enriched.csv` + `artifacts/reports/<run>_enriched/summary.md` + `timeseries.png`
 
 - 用 time_in_state 增量估算某个 policy 对应 cluster 的 CPU 能耗（mJ）：
-	- `D:/workshop/MP_power/.venv/Scripts/python.exe scripts/parse_time_in_state.py --cluster-csv artifacts/android/power_profile/cluster0_freq_power.csv --deltas-csv artifacts/runs/<run.csv> --out artifacts/runs/<run_with_energy.csv> --policy 0`
+	- （已内置在 pipeline enrich 步骤中，一般不需要单独运行；如需调试可保留使用 `analysis/parse_time_in_state.py`）
 	- 说明：power_profile 提供的是 `power_ma`，脚本会用采样 CSV 的 `battery_voltage_mv` 折算 $P_{mW}=I_{mA}V_{mV}/1000$，并按 $E_{mJ}=P_{mW}\Delta t_{ms}/1000$ 得到能量。
 
 ## 5. 质量控制与注意事项

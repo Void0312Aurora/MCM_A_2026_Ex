@@ -38,7 +38,7 @@
 - 优势：采样间隔可到 250ms 量级，显著缓解 `dumpsys battery` 的 `Charge counter` 低频/阶梯化问题，适合 9 分钟硬约束下做趋势对比。
 
 仓库支持：
-- 采集：`scripts/pipeline_run.py` 增加 `--perfetto-android-power`（与采样并行录制，结束后自动拉取并解析）。
+- 采集：`scripts/pipeline_run.py` 默认启用 Perfetto `android.power`（与采样并行录制，结束后自动拉取并解析）。如需显式关闭：`--no-perfetto-android-power`。
 - 解析：`python -m mp_power.pipeline_ops parse-perfetto-android-power --trace <trace.pftrace> --out-dir <out_dir>`（输出 timeseries CSV + summary CSV/JSON）。
 
 ### 2.2 热数据（可用于热模型/温度影响）
@@ -268,7 +268,7 @@
 
 示例：
 
-- `python scripts/pipeline_run.py --scenario S2_b90 --duration 540 --interval 2 --perfetto-android-power --perfetto-policy-trace`
+- `python scripts/pipeline_run.py --scenario S2_b90 --duration 540 --interval 2 --perfetto-policy-trace`
 
 备注：
 

@@ -120,6 +120,12 @@ def main() -> int:
         action="store_true",
         help="Use `dumpsys batterystats --usage --model power-profile` as a stable short-window energy estimate: reset before sampling and dump after.",
     )
+
+    parser.add_argument(
+        "--qc",
+        action="store_true",
+        help="After enrich, run qc/qc_run.py on the enriched CSV (prints quick acceptance stats).",
+    )
     parser.add_argument(
         "--batterystats-proto",
         action="store_true",
@@ -134,14 +140,23 @@ def main() -> int:
         action="store_true",
         help="If set, run `dumpsys batterystats --reset` before capturing the START proto.",
     )
-    parser.add_argument(
+    perf = parser.add_mutually_exclusive_group()
+    perf.add_argument(
         "--perfetto-android-power",
+        dest="perfetto_android_power",
         action="store_true",
+        default=True,
         help=(
             "Record a Perfetto trace using data source android.power (battery counters) during sampling, "
             "then parse batt.current_ua / batt.voltage_uv / batt.charge_uah into a timeseries + summary. "
-            "Works on devices which implement these counters." 
+            "(default: enabled)"
         ),
+    )
+    perf.add_argument(
+        "--no-perfetto-android-power",
+        dest="perfetto_android_power",
+        action="store_false",
+        help="Disable Perfetto android.power battery counters (not recommended; may cause inconsistent energy source).",
     )
     parser.add_argument(
         "--perfetto-battery-poll-ms",
@@ -247,6 +262,11 @@ def main() -> int:
 
         want_perfetto = bool(args.perfetto_android_power or args.perfetto_policy_trace)
         if want_perfetto:
+            if args.perfetto_android_power:
+                print(f"Perfetto android.power: enabled (battery_poll_ms={int(args.perfetto_battery_poll_ms)})")
+            if args.perfetto_policy_trace:
+                print("Perfetto policy trace: enabled (linux.ftrace + atrace)")
+
             if not args.serial:
                 # Keep behavior consistent with other adb operations: if not provided, let adb decide.
                 # However, perfetto tracing is critical enough that we require explicit serial if multiple devices.
@@ -324,6 +344,7 @@ def main() -> int:
                 raise SystemExit("failed to open stdin pipe for perfetto")
             perfetto_proc.stdin.write(cfg_text.encode("utf-8"))
             perfetto_proc.stdin.close()
+            print(f"Perfetto: started (remote_out={perfetto_remote_out})")
 
         # Optional: batterystats proto capture (schema-min). This is a binary blob: use exec-out.
         bs_start_pb: Path | None = None
@@ -411,6 +432,7 @@ def main() -> int:
             perfetto_local_trace.write_bytes(blob)
             if perfetto_local_trace.stat().st_size == 0:
                 raise SystemExit("perfetto trace is empty")
+            print(f"Perfetto: pulled trace -> {perfetto_local_trace}")
 
             if args.perfetto_android_power:
                 try:
@@ -422,6 +444,7 @@ def main() -> int:
                     )
                 except Exception as e:
                     raise SystemExit(f"parse_perfetto_android_power_counters failed: {e}")
+                print("Perfetto: parsed android.power -> perfetto_android_power_summary.csv + timeseries.csv")
 
             if args.perfetto_policy_trace:
                 try:
@@ -446,6 +469,13 @@ def main() -> int:
         enrich_run_with_cpu_energy(run_csv=run_csv, out_csv=enriched_csv)
     except Exception as e:
         raise SystemExit(f"enrich_run_with_cpu_energy failed: {e}")
+
+    # 4.5) Optional QC
+    if args.qc:
+        qc_cmd = [py, "qc/qc_run.py", "--csv", str(enriched_csv)]
+        rc = subprocess.run(qc_cmd).returncode
+        if rc != 0:
+            raise SystemExit(f"qc_run failed with code {rc}")
 
     # 5) Report
     try:

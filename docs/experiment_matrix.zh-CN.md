@@ -146,10 +146,12 @@ v1 目标：用**最小可辨识**的实验集合，完成题目要求的闭环�
 除非需要指定设备，`--serial` 可省略（脚本会优先选择无线设备）。
 
 - 采样 + enrich + report（推荐）：
-  - `D:/workshop/MP_power/.venv/Scripts/python.exe scripts/pipeline_run.py --scenario <SCENARIO> --duration <SECONDS> --interval 2 --thermal --display --auto-reset-battery --log-every 30`
+  - `D:/workshop/MP_power/.venv/Scripts/python.exe scripts/pipeline_run.py --scenario <SCENARIO> --duration <SECONDS> --interval 2 --thermal --display --auto-reset-battery --log-every 30 --qc`
 - 质量自检（跑完立刻做）：
   - `D:/workshop/MP_power/.venv/Scripts/python.exe qc/qc_run.py --csv artifacts/runs/<run>_enriched.csv`
   - （可选）如果只想生成报告而不重跑采样：`D:/workshop/MP_power/.venv/Scripts/python.exe scripts/pipeline_run.py --skip-sample --run-csv artifacts/runs/<run>.csv --scenario <label>`
+
+备注：`pipeline_run.py` 默认启用 Perfetto `android.power`（高频电池 counters，默认 250ms）。如需显式关闭：`--no-perfetto-android-power`（不推荐用于正式数据）。
 
 备注：当你怀疑“是否中途熄屏/是否真的保持 ON”时，建议加 `--display`，它会在 CSV 中记录 `display_state`（来自 `dumpsys power`）。
 

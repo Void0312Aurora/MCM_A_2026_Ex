@@ -12,6 +12,47 @@ def _num(df: pd.DataFrame, col: str) -> pd.Series:
     return pd.to_numeric(df[col], errors="coerce")
 
 
+def _find_report_dir(run_csv: Path) -> Path | None:
+    stem = run_csv.stem
+    report_stem = stem if stem.endswith("_enriched") else stem + "_enriched"
+    report_dir = Path("artifacts") / "reports" / report_stem
+    if report_dir.exists():
+        return report_dir
+    return None
+
+
+def _read_perfetto_summary(report_dir: Path | None) -> dict[str, float] | None:
+    if report_dir is None:
+        return None
+    pf_csv = report_dir / "perfetto_android_power_summary.csv"
+    if not pf_csv.exists():
+        return None
+    try:
+        pf = pd.read_csv(pf_csv)
+        if pf.empty:
+            return None
+        row = pf.iloc[0].to_dict()
+        out: dict[str, float] = {}
+        for k in [
+            "duration_s",
+            "sample_period_s_median",
+            "discharge_mah",
+            "energy_mwh",
+            "power_mw_mean",
+            "current_ua_mean",
+        ]:
+            v = row.get(k)
+            if v is None:
+                continue
+            try:
+                out[k] = float(v)
+            except Exception:
+                continue
+        return out
+    except Exception:
+        return None
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Quick QC stats for a run CSV (prefer enriched)")
     parser.add_argument("--csv", type=Path, required=True)
@@ -21,6 +62,27 @@ def main() -> int:
 
     print("rows", len(df))
     print("columns", len(df.columns))
+
+    report_dir = _find_report_dir(args.csv)
+    pf = _read_perfetto_summary(report_dir)
+    if report_dir is not None:
+        print("report_dir", str(report_dir))
+    if pf is not None:
+        print("perfetto_android_power present", True)
+        for k in [
+            "duration_s",
+            "sample_period_s_median",
+            "discharge_mah",
+            "energy_mwh",
+            "power_mw_mean",
+            "current_ua_mean",
+        ]:
+            if k in pf:
+                print(f"perfetto_{k}", pf[k])
+        print("battery_power_source_preferred", "perfetto_android_power")
+    else:
+        print("perfetto_android_power present", False)
+        print("battery_power_source_preferred", "charge_counter_diff")
 
     # adb_error
     if "adb_error" in df.columns:

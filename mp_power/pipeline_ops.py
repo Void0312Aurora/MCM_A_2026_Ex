@@ -887,6 +887,8 @@ class RunSummary:
     rows: int
     mean_voltage_mv: float | None
     mean_batt_power_mw: float | None
+    mean_batt_power_mw_perfetto: float | None
+    batt_power_source_preferred: str
     mean_cpu_power_mw: float | None
 
 
@@ -945,6 +947,29 @@ def report_run(csv_path: Path, out_dir: Path | None = None) -> tuple[Path, Path]
     )
     mean_cpu_power_mw = float(out["cpu_power_mW_total"].mean()) if "cpu_power_mW_total" in out.columns else None
 
+    # Optional: prefer Perfetto android.power battery counters if present in the report dir.
+    pf_ts_path = out_dir / "perfetto_android_power_timeseries.csv"
+    pf_summary_path = out_dir / "perfetto_android_power_summary.csv"
+    mean_batt_power_mw_perfetto: float | None = None
+    pf_power_ts: pd.Series | None = None
+    pf_x: pd.Series | None = None
+    if pf_ts_path.exists():
+        try:
+            pf_ts = pd.read_csv(pf_ts_path)
+            if "t_s" in pf_ts.columns and "power_mw_calc" in pf_ts.columns:
+                pf_x = pd.to_numeric(pf_ts["t_s"], errors="coerce")
+                pf_power_ts = pd.to_numeric(pf_ts["power_mw_calc"], errors="coerce")
+                if pf_power_ts.notna().any():
+                    mean_batt_power_mw_perfetto = float(pf_power_ts.mean())
+        except Exception:
+            # Keep report generation best-effort.
+            pf_x = None
+            pf_power_ts = None
+
+    batt_power_source_preferred = "charge_counter_diff"
+    if pf_summary_path.exists() or mean_batt_power_mw_perfetto is not None:
+        batt_power_source_preferred = "perfetto_android_power"
+
     summary = RunSummary(
         start_ts=start_ts,
         end_ts=end_ts,
@@ -952,6 +977,8 @@ def report_run(csv_path: Path, out_dir: Path | None = None) -> tuple[Path, Path]
         rows=rows,
         mean_voltage_mv=mean_voltage_mv,
         mean_batt_power_mw=mean_batt_power_mw,
+        mean_batt_power_mw_perfetto=mean_batt_power_mw_perfetto,
+        batt_power_source_preferred=batt_power_source_preferred,
         mean_cpu_power_mw=mean_cpu_power_mw,
     )
 
@@ -971,8 +998,11 @@ def report_run(csv_path: Path, out_dir: Path | None = None) -> tuple[Path, Path]
         lines.append(f"- duration_s: {summary.duration_s:.1f}")
     if summary.mean_voltage_mv is not None:
         lines.append(f"- mean_voltage_mv: {summary.mean_voltage_mv:.1f}")
+    lines.append(f"- battery_power_source_preferred: {summary.batt_power_source_preferred}")
     if summary.mean_batt_power_mw is not None:
-        lines.append(f"- mean_batt_discharge_power_mW: {summary.mean_batt_power_mw:.1f}")
+        lines.append(f"- mean_batt_discharge_power_mW_charge_counter: {summary.mean_batt_power_mw:.1f}")
+    if summary.mean_batt_power_mw_perfetto is not None:
+        lines.append(f"- mean_batt_power_mW_perfetto: {summary.mean_batt_power_mw_perfetto:.1f}")
     if summary.mean_cpu_power_mw is not None:
         lines.append(f"- mean_cpu_power_mW_total: {summary.mean_cpu_power_mw:.1f}")
 
@@ -1002,6 +1032,8 @@ def report_run(csv_path: Path, out_dir: Path | None = None) -> tuple[Path, Path]
         axes[3].plot(x, out["brightness"], label="brightness", color="tab:orange")
     if "batt_discharge_power_mW" in out.columns:
         axes[3].plot(x, out["batt_discharge_power_mW"], label="batt_discharge_power_mW", color="tab:green")
+    if pf_x is not None and pf_power_ts is not None:
+        axes[3].plot(pf_x, pf_power_ts, label="perfetto_power_mw_calc", color="tab:blue", alpha=0.9)
     axes[3].set_ylabel("brightness / mW")
     axes[3].legend(loc="best")
 

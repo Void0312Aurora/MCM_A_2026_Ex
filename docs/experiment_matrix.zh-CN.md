@@ -102,14 +102,36 @@ v1 目标：用**最小可辨识**的实验集合，完成题目要求的闭环�
 对应脚本参数示例：
 - `D:/workshop/MP_power/.venv/Scripts/python.exe scripts/s2_run_from_current_brightness.py --serial <serial> --enable-write-settings --set-timeout-ms 1800000 --set-brightness 90 --duration 540 --thermal --auto-reset-battery`
 
+同样能力也已集成到 `scripts/pipeline_run.py`（更统一，少一个脚本入口，是否生效取决于 OEM 是否允许 WRITE_SETTINGS）：
+- `D:/workshop/MP_power/.venv/Scripts/python.exe scripts/pipeline_run.py --serial <serial> --scenario S2_b90 --set-brightness 90 --set-timeout-ms 1800000 --enable-write-settings --duration 540 --interval 2 --thermal --display --auto-reset-battery --log-every 30 --qc`
+
 ---
 
 ### S3：CPU 负载（必做，量级校准，20–30 分钟）
 
 - 目的：把 `time_in_state + power_profile` 的 CPU 解释器与真实放电对齐，得到 CPU 缩放系数 `k_cpu`（或残差上界）。
-- 设计：两段（建议同一条 run 内，或拆成两条短 run）：
-  - idle：10–15 分钟（屏幕关或最低亮度，保持不操作）
-  - load：10–15 分钟（固定负载，例如循环计算/本地 benchmark；以“可复现”为准）
+
+- 设计（推荐在“单次 8–9 分钟”约束下的可执行版）：
+  - S3-idle：540s，屏幕关（或最低亮度），不操作。
+  - S3-load：540s，同样条件，但在整个 run 窗口施加可复现 CPU 负载。
+  - 分析时统一剔除前 60–120s（过渡），只比较稳态窗口（例如 120s–540s）。
+
+- 负载生成方式（无需 root，建议用 pipeline 内置的 CPU load）：
+  - 通过 `scripts/pipeline_run.py --cpu-load-threads N` 在手机端启动 N 个简单 busy-loop 进程，run 结束自动清理。
+  - N 的选择：
+    - 轻载：1（主要驱动小核/低频）
+    - 中载：2–4（视机型而定）
+    - 重载：接近核心数（用于逼近满载上界）
+
+- 强烈建议同时开启“策略观测”（用于判断 governor/调度约束是否变化）：
+  - `--policy-knobs --policy-knobs-period-s 30`
+  - `--policy-services power,performance_hint --policy-services-period-s 30`
+
+示例命令（两条都建议加 `--qc` 立刻验收）：
+- S3-idle：
+  - `D:/workshop/MP_power/.venv/Scripts/python.exe scripts/pipeline_run.py --scenario S3_idle --duration 540 --interval 2 --thermal --display --auto-reset-battery --log-every 30 --policy-knobs --policy-knobs-period-s 30 --policy-services power,performance_hint --policy-services-period-s 30 --qc`
+- S3-load（示例 4 线程）：
+  - `D:/workshop/MP_power/.venv/Scripts/python.exe scripts/pipeline_run.py --scenario S3_load_t4 --duration 540 --interval 2 --thermal --display --auto-reset-battery --log-every 30 --policy-knobs --policy-knobs-period-s 30 --policy-services power,performance_hint --policy-services-period-s 30 --cpu-load-threads 4 --qc`
 
 ### S4：GPS 使用（必做，量级识别，20–30 分钟）
 

@@ -99,7 +99,15 @@ def pick_default_serial(adb: str, timeout_s: float) -> str | None:
         return None
     if len(devices) == 1:
         return devices[0][0]
-    # Prefer Wi‑Fi wireless debugging TLS connect record
+    # Prefer explicit ip:port serial if present (more stable and lower-latency than mDNS records).
+    import re
+
+    ip_port = re.compile(r"^\d{1,3}(?:\.\d{1,3}){3}:\d+$")
+    for s, _ in devices:
+        if ip_port.match(s):
+            return s
+
+    # Fallback: Wi‑Fi wireless debugging TLS connect record
     for s, _ in devices:
         if "_adb-tls-connect._tcp" in s:
             return s

@@ -288,19 +288,31 @@ def plot_single_run(df: pd.DataFrame, info: RunInfo, out_path: Path, rolling_s: 
     plt.close(fig)
 
 
-def plot_overlay_power(runs: list[tuple[pd.DataFrame, RunInfo]], out_path: Path, rolling_s: int) -> None:
+def plot_overlay_power(
+    runs: list[tuple[pd.DataFrame, RunInfo]],
+    out_path: Path,
+    rolling_s: int,
+    power_source: str = "preferred",
+) -> None:
     fig, axes = plt.subplots(3, 1, figsize=(12, 10), sharex=True)
 
     for df, info in runs:
         x = df["t_s"]
-        # Prefer current_now if present; fallback to energy-derived
-        if "batt_discharge_power_mW_current_now" in df.columns and df["batt_discharge_power_mW_current_now"].notna().any():
-            p = df["batt_discharge_power_mW_current_now"]
-            axes[0].plot(x, _rolling_mean(p, df, rolling_s), label=f"{info.label} (current_now)")
+        ps = (power_source or "preferred").strip().lower()
+
+        if ps in ("cc", "charge_counter", "charge-counter"):
+            p = df.get("batt_discharge_power_mW_cc")
+            if p is not None and pd.to_numeric(p, errors="coerce").notna().any():
+                axes[0].plot(x, _rolling_mean(pd.to_numeric(p, errors="coerce"), df, rolling_s), label=f"{info.label} (charge_counter)")
         else:
-            p = df["batt_discharge_power_mW_energy"]
-            if p.notna().any():
-                axes[0].plot(x, _rolling_mean(p, df, rolling_s), label=f"{info.label} (energy)")
+            # Prefer current_now if present; fallback to energy-derived
+            if "batt_discharge_power_mW_current_now" in df.columns and df["batt_discharge_power_mW_current_now"].notna().any():
+                p = df["batt_discharge_power_mW_current_now"]
+                axes[0].plot(x, _rolling_mean(p, df, rolling_s), label=f"{info.label} (current_now)")
+            else:
+                p = df["batt_discharge_power_mW_energy"]
+                if p.notna().any():
+                    axes[0].plot(x, _rolling_mean(p, df, rolling_s), label=f"{info.label} (energy)")
 
         cpu = df["cpu_power_mW_total"]
         if cpu.notna().any():
@@ -430,12 +442,19 @@ def main() -> int:
         default=60.0,
         help="Skip from overlay/summary if duration (from t_s) < this (still writes per-run plot)",
     )
+    ap.add_argument(
+        "--overlay-power-source",
+        type=str,
+        default="auto",
+        help="Overlay discharge power source: auto|preferred|charge_counter. auto uses charge_counter if any run lacks perfetto_android_power_timeseries.csv",
+    )
     args = ap.parse_args()
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
 
     loaded: list[tuple[pd.DataFrame, RunInfo]] = []
     loaded_valid: list[tuple[pd.DataFrame, RunInfo]] = []
+    perfetto_present_by_label: dict[str, bool] = {}
     step_events: list[pd.DataFrame] = []
     skipped_rows: list[dict[str, object]] = []
     for p in args.csv:
@@ -449,6 +468,7 @@ def main() -> int:
         # Auto-detect corresponding report dir for perfetto android.power outputs.
         report_dir = Path("artifacts") / "reports" / p.stem
         perfetto_ts = _load_perfetto_timeseries(report_dir)
+        perfetto_present_by_label[info.label] = perfetto_ts is not None
 
         # Validity check for overlay/summary (avoid extremely short / aborted runs)
         duration_s = None
@@ -494,7 +514,10 @@ def main() -> int:
     # One overlay chart for quick comparison
     overlay_path = args.out_dir / "overlay_power_cpu_thermal.png"
     if loaded_valid:
-        plot_overlay_power(loaded_valid, overlay_path, rolling_s=args.rolling_s)
+        ps = (args.overlay_power_source or "auto").strip().lower()
+        if ps == "auto":
+            ps = "preferred" if all(perfetto_present_by_label.get(info.label, False) for _, info in loaded_valid) else "charge_counter"
+        plot_overlay_power(loaded_valid, overlay_path, rolling_s=args.rolling_s, power_source=ps)
         print(f"Wrote: {overlay_path}")
     else:
         print("No valid runs for overlay_power_cpu_thermal.png (all skipped)")

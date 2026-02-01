@@ -12,7 +12,9 @@ ensure_repo_root_on_sys_path()
 
 from mp_power.adb import adb_exec_out
 from mp_power.adb import adb_shell
+from mp_power.adb import pick_default_serial
 from mp_power.adb import resolve_adb
+from mp_power.adb import shell_ok
 from mp_power.pipeline_ops import enrich_run_with_cpu_energy
 from mp_power.pipeline_ops import parse_perfetto_android_power_counters
 from mp_power.pipeline_ops import parse_perfetto_policy_markers
@@ -74,6 +76,99 @@ def _parse_batterystats_usage_global(text: str) -> dict[str, float]:
     return out
 
 
+def _ensure_write_settings(adb: str, serial: str | None) -> None:
+    # Best-effort: some OEM builds require this for `settings put system ...`.
+    shell_ok(adb, serial, ["appops", "set", "com.android.shell", "WRITE_SETTINGS", "allow"], timeout_s=8.0)
+
+
+def _set_system_setting(adb: str, serial: str | None, key: str, value: int) -> None:
+    shell_ok(adb, serial, ["settings", "put", "system", key, str(int(value))], timeout_s=8.0)
+
+
+def _get_system_setting(adb: str, serial: str | None, key: str) -> str | None:
+    rc, out, _ = adb_shell(adb, serial, ["settings", "get", "system", key], timeout_s=8.0)
+    if rc != 0:
+        return None
+    s = (out or "").strip()
+    if not s or s.lower() == "null":
+        return None
+    return s
+
+
+def _cpu_load_start(adb: str, serial: str | None, threads: int) -> None:
+    """Start best-effort CPU busy-loop workers on device and record their PIDs.
+
+    This is intentionally simple and dependency-free (no root, no extra binaries).
+    """
+
+    threads = int(threads)
+    if threads <= 0:
+        return
+
+    # Store PIDs so we can stop reliably even if process names differ across devices.
+    pid_file = "/data/local/tmp/mp_power_cpu_load.pids"
+    # Start gradually and (if possible) with lower priority so adb shell itself still gets CPU time.
+    # Give each worker a distinctive $0 argv marker so we can pkill it even if the pid file is missing.
+    script = (
+        # Pre-clean leftovers from previous aborted runs.
+        "HAS_PKILL=0; command -v pkill >/dev/null 2>&1 && HAS_PKILL=1; "
+        "if [ -f " + pid_file + " ]; then "
+        "  for p in $(cat " + pid_file + "); do kill $p >/dev/null 2>&1; done; "
+        "  sleep 0.1; "
+        "  for p in $(cat " + pid_file + "); do kill -9 $p >/dev/null 2>&1; done; "
+        "  rm -f " + pid_file + "; "
+        "fi; "
+        "if [ $HAS_PKILL -eq 1 ]; then pkill -f mp_power_cpu_load_worker >/dev/null 2>&1 || true; fi; "
+        # Start new workers.
+        "PIDS=; i=0; "
+        "HAS_NICE=0; command -v nice >/dev/null 2>&1 && HAS_NICE=1; "
+        f"while [ $i -lt {threads} ]; do "
+        "  TAG=mp_power_cpu_load_worker_$i; "
+        "  if [ $HAS_NICE -eq 1 ]; then "
+        "    (nice -n 10 sh -c 'while true; do :; done' $TAG) >/dev/null 2>&1 & "
+        "  else "
+        "    (sh -c 'while true; do :; done' $TAG) >/dev/null 2>&1 & "
+        "  fi; "
+        "  PIDS=\"$PIDS $!\"; "
+        "  i=$((i+1)); "
+        "  sleep 0.05; "
+        "done; "
+        f"echo $PIDS > {pid_file}; "
+        "echo started:$PIDS"
+    )
+
+    rc, out, err = adb_shell(adb, serial, ["sh", "-c", script], timeout_s=60.0)
+    if rc != 0:
+        raise RuntimeError((err or out).strip() or "failed to start cpu load")
+    print(f"CPU load: started threads={threads} (pid_file={pid_file})")
+
+
+def _cpu_load_stop(adb: str, serial: str | None) -> None:
+    """Stop CPU load workers previously started by _cpu_load_start (best-effort)."""
+
+    pid_file = "/data/local/tmp/mp_power_cpu_load.pids"
+    script = (
+        "HAS_PKILL=0; command -v pkill >/dev/null 2>&1 && HAS_PKILL=1; "
+        f"if [ -f {pid_file} ]; then "
+        f"  PIDS=\"$(cat {pid_file})\"; "
+        "  for p in $PIDS; do kill $p >/dev/null 2>&1; done; "
+        "  sleep 0.1; "
+        "  for p in $PIDS; do kill -9 $p >/dev/null 2>&1; done; "
+        f"  rm -f {pid_file}; "
+        "fi; "
+        # Fallback cleanup if pid file is missing/stale.
+        "if [ $HAS_PKILL -eq 1 ]; then "
+        "  pkill -f mp_power_cpu_load_worker >/dev/null 2>&1 || true; "
+        "  pkill -f mp_power_cpu_load\\.pids >/dev/null 2>&1 || true; "
+        "fi; "
+        "echo stopped"
+    )
+    rc, out, err = adb_shell(adb, serial, ["sh", "-c", script], timeout_s=60.0)
+    if rc != 0:
+        raise RuntimeError((err or out).strip() or "failed to stop cpu load")
+    print("CPU load: stopped")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Fixed pipeline: sample -> enrich -> report")
     parser.add_argument("--python", default=None, help="Python executable (default: current interpreter)")
@@ -119,6 +214,35 @@ def main() -> int:
         "--batterystats-usage",
         action="store_true",
         help="Use `dumpsys batterystats --usage --model power-profile` as a stable short-window energy estimate: reset before sampling and dump after.",
+    )
+
+    parser.add_argument(
+        "--cpu-load-threads",
+        type=int,
+        default=0,
+        help=(
+            "If >0, start N simple busy-loop CPU workers on device for the whole run window and stop them after. "
+            "Useful for S3 CPU负载实验. (best-effort, no root)"
+        ),
+    )
+
+    # Optional: automatically set brightness/timeout for S2 (requires OEM allowing WRITE_SETTINGS).
+    parser.add_argument(
+        "--set-brightness",
+        type=int,
+        default=None,
+        help="If provided, try to set manual brightness (0-255) via adb before sampling (best-effort).",
+    )
+    parser.add_argument(
+        "--set-timeout-ms",
+        type=int,
+        default=None,
+        help="If provided, try to set screen_off_timeout (ms) via adb before sampling (best-effort).",
+    )
+    parser.add_argument(
+        "--enable-write-settings",
+        action="store_true",
+        help="Try `appops set com.android.shell WRITE_SETTINGS allow` so adb can change system settings.",
     )
 
     parser.add_argument(
@@ -202,6 +326,11 @@ def main() -> int:
     parser.add_argument("--run-csv", type=Path, default=None, help="Existing run CSV when --skip-sample")
     args = parser.parse_args()
 
+    if args.set_brightness is not None and not (0 <= int(args.set_brightness) <= 255):
+        raise SystemExit("--set-brightness must be in [0, 255]")
+    if args.set_timeout_ms is not None and int(args.set_timeout_ms) <= 0:
+        raise SystemExit("--set-timeout-ms must be positive")
+
     py = args.python
     if py is None:
         import sys
@@ -255,6 +384,12 @@ def main() -> int:
 
         # Optional: Perfetto trace(s) (run in parallel with sampling).
         adb_path = resolve_adb(args.adb)
+        serial_used = args.serial
+        if not serial_used:
+            serial_used = pick_default_serial(adb_path, timeout_s=8.0)
+            if not serial_used:
+                raise SystemExit("No adb devices found. Provide --serial or connect a device.")
+            print(f"Using default adb serial: {serial_used}")
         perfetto_proc: subprocess.Popen[bytes] | None = None
         perfetto_remote_cfg: str | None = None
         perfetto_remote_out: str | None = None
@@ -323,8 +458,8 @@ def main() -> int:
 
             # Start perfetto in parallel.
             perfetto_cmd = [adb_path]
-            if args.serial:
-                perfetto_cmd += ["-s", args.serial]
+            if serial_used:
+                perfetto_cmd += ["-s", serial_used]
             perfetto_cmd += [
                 "shell",
                 "perfetto",
@@ -351,117 +486,163 @@ def main() -> int:
         bs_end_pb: Path | None = None
         if args.batterystats_proto:
             if args.batterystats_proto_reset:
-                rc, out, err = adb_shell(adb_path, args.serial, ["dumpsys", "batterystats", "--reset"], timeout_s=20.0)
+                rc, out, err = adb_shell(adb_path, serial_used, ["dumpsys", "batterystats", "--reset"], timeout_s=20.0)
                 if rc != 0:
                     raise SystemExit(f"batterystats --reset failed: {err or out}")
 
             bs_start_pb = report_dir / "batterystats_start.pb"
-            rc, blob, err = adb_exec_out(adb_path, args.serial, ["dumpsys", "batterystats", "--proto"], timeout_s=30.0)
+            rc, blob, err = adb_exec_out(adb_path, serial_used, ["dumpsys", "batterystats", "--proto"], timeout_s=30.0)
             if rc != 0:
                 raise SystemExit(f"batterystats --proto (start) failed: {err}")
             bs_start_pb.write_bytes(blob)
 
         # Optional: reset batterystats so the subsequent --usage dump represents only this run window.
         if args.batterystats_usage:
-            rc, out, err = adb_shell(adb_path, args.serial, ["dumpsys", "batterystats", "--reset"], timeout_s=20.0)
+            rc, out, err = adb_shell(adb_path, serial_used, ["dumpsys", "batterystats", "--reset"], timeout_s=20.0)
             if rc != 0:
                 raise SystemExit(f"batterystats --reset failed: {err or out}")
 
-        sample_cmd = [
-            py,
-            "scripts/adb_sample_power.py",
-            "--scenario",
-            args.scenario,
-            "--duration",
-            str(args.duration),
-            "--interval",
-            str(args.interval),
-            "--out",
-            str(run_csv),
-            "--log-every",
-            str(args.log_every),
-        ]
-        if args.adb:
-            sample_cmd += ["--adb", args.adb]
-        if args.serial:
-            sample_cmd += ["--serial", args.serial]
-        if args.thermal:
-            sample_cmd += ["--thermal"]
-        if args.display:
-            sample_cmd += ["--display"]
-        if args.batteryproperties:
-            sample_cmd += ["--batteryproperties"]
-        if args.policy_knobs:
-            sample_cmd += ["--policy-knobs"]
-            if args.policy_knobs_period_s and float(args.policy_knobs_period_s) > 0:
-                sample_cmd += ["--policy-knobs-period-s", str(args.policy_knobs_period_s)]
-
-        if str(getattr(args, "policy_services", "")).strip():
-            sample_cmd += ["--policy-services", str(args.policy_services)]
-            if args.policy_services_period_s and float(args.policy_services_period_s) > 0:
-                sample_cmd += ["--policy-services-period-s", str(args.policy_services_period_s)]
-        if args.auto_reset_battery:
-            sample_cmd += ["--auto-reset-battery"]
-
-        # Passthrough stdout/stderr so long runs keep producing output (avoids appearing idle).
-        rc = subprocess.run(sample_cmd).returncode
-        if rc != 0:
-            raise SystemExit(f"adb_sample_power failed with code {rc}")
-
-        # Wait for perfetto to finish and pull + parse trace.
-        if want_perfetto:
-            if perfetto_proc is None or perfetto_remote_out is None:
-                raise SystemExit("perfetto process was not started")
-
+        # Optional: set brightness/timeout before sampling (useful for S2 brightness steps).
+        if args.set_brightness is not None or args.set_timeout_ms is not None:
             try:
-                # Give perfetto a small grace period after sampling ends.
-                stdout_b, stderr_b = perfetto_proc.communicate(timeout=float(args.duration) + 30.0)
-            except subprocess.TimeoutExpired:
-                perfetto_proc.kill()
-                raise SystemExit("perfetto did not finish in time")
+                if args.enable_write_settings:
+                    _ensure_write_settings(adb_path, serial_used)
 
-            if perfetto_proc.returncode not in (0, None):
-                stdout = stdout_b.decode("utf-8", errors="replace") if stdout_b else ""
-                stderr = stderr_b.decode("utf-8", errors="replace") if stderr_b else ""
-                raise SystemExit(f"perfetto failed (exit={perfetto_proc.returncode}): {stderr or stdout}")
+                if args.set_brightness is not None:
+                    # Enforce manual mode for rigorous S2.
+                    _set_system_setting(adb_path, serial_used, "screen_brightness_mode", 0)
+                    _set_system_setting(adb_path, serial_used, "screen_brightness", int(args.set_brightness))
 
-            perfetto_local_trace = report_dir / "perfetto_trace.pftrace"
-            rc, blob, err = adb_exec_out(adb_path, args.serial, ["cat", perfetto_remote_out], timeout_s=30.0)
+                if args.set_timeout_ms is not None:
+                    _set_system_setting(adb_path, serial_used, "screen_off_timeout", int(args.set_timeout_ms))
+
+                b = _get_system_setting(adb_path, serial_used, "screen_brightness")
+                m = _get_system_setting(adb_path, serial_used, "screen_brightness_mode")
+                t = _get_system_setting(adb_path, serial_used, "screen_off_timeout")
+                print(f"Applied settings: screen_brightness={b} mode={m} timeout_ms={t}")
+            except Exception as e:
+                raise SystemExit(
+                    "Failed to set brightness/timeout via adb. "
+                    "If your device restricts WRITE_SETTINGS, try adding --enable-write-settings, "
+                    "or set brightness/timeout manually in the phone UI. "
+                    f"Details: {e}"
+                )
+
+        cpu_load_started = False
+        try:
+            if args.cpu_load_threads and int(args.cpu_load_threads) > 0:
+                _cpu_load_start(adb_path, serial_used, int(args.cpu_load_threads))
+                cpu_load_started = True
+
+            sample_cmd = [
+                py,
+                "scripts/adb_sample_power.py",
+                "--scenario",
+                args.scenario,
+                "--duration",
+                str(args.duration),
+                "--interval",
+                str(args.interval),
+                "--out",
+                str(run_csv),
+                "--log-every",
+                str(args.log_every),
+            ]
+            if args.adb:
+                sample_cmd += ["--adb", args.adb]
+            # Always pass a serial when multiple devices may exist.
+            if serial_used:
+                sample_cmd += ["--serial", serial_used]
+            if args.thermal:
+                sample_cmd += ["--thermal"]
+            if args.display:
+                sample_cmd += ["--display"]
+            if args.batteryproperties:
+                sample_cmd += ["--batteryproperties"]
+            if args.policy_knobs:
+                sample_cmd += ["--policy-knobs"]
+                if args.policy_knobs_period_s and float(args.policy_knobs_period_s) > 0:
+                    sample_cmd += ["--policy-knobs-period-s", str(args.policy_knobs_period_s)]
+
+            if str(getattr(args, "policy_services", "")).strip():
+                sample_cmd += ["--policy-services", str(args.policy_services)]
+                if args.policy_services_period_s and float(args.policy_services_period_s) > 0:
+                    sample_cmd += ["--policy-services-period-s", str(args.policy_services_period_s)]
+            if args.auto_reset_battery:
+                sample_cmd += ["--auto-reset-battery"]
+
+            # Passthrough stdout/stderr so long runs keep producing output (avoids appearing idle).
+            rc = subprocess.run(sample_cmd).returncode
             if rc != 0:
-                raise SystemExit(f"failed to pull perfetto trace via exec-out: {err}")
-            perfetto_local_trace.write_bytes(blob)
-            if perfetto_local_trace.stat().st_size == 0:
-                raise SystemExit("perfetto trace is empty")
-            print(f"Perfetto: pulled trace -> {perfetto_local_trace}")
+                raise SystemExit(f"adb_sample_power failed with code {rc}")
 
-            if args.perfetto_android_power:
+            # Wait for perfetto to finish and pull + parse trace.
+            if want_perfetto:
+                if perfetto_proc is None or perfetto_remote_out is None:
+                    raise SystemExit("perfetto process was not started")
+
                 try:
-                    parse_perfetto_android_power_counters(
-                        perfetto_local_trace,
-                        out_dir=report_dir,
-                        label=f"{run_id}_{args.scenario}",
-                        no_timeseries=False,
-                    )
-                except Exception as e:
-                    raise SystemExit(f"parse_perfetto_android_power_counters failed: {e}")
-                print("Perfetto: parsed android.power -> perfetto_android_power_summary.csv + timeseries.csv")
+                    # Give perfetto a small grace period after sampling ends.
+                    stdout_b, stderr_b = perfetto_proc.communicate(timeout=float(args.duration) + 30.0)
+                except subprocess.TimeoutExpired:
+                    perfetto_proc.kill()
+                    raise SystemExit("perfetto did not finish in time")
 
-            if args.perfetto_policy_trace:
+                if perfetto_proc.returncode not in (0, None):
+                    stdout = stdout_b.decode("utf-8", errors="replace") if stdout_b else ""
+                    stderr = stderr_b.decode("utf-8", errors="replace") if stderr_b else ""
+                    raise SystemExit(f"perfetto failed (exit={perfetto_proc.returncode}): {stderr or stdout}")
+
+                perfetto_local_trace = report_dir / "perfetto_trace.pftrace"
+                rc, blob, err = adb_exec_out(adb_path, serial_used, ["cat", perfetto_remote_out], timeout_s=30.0)
+                if rc != 0:
+                    raise SystemExit(f"failed to pull perfetto trace via exec-out: {err}")
+                perfetto_local_trace.write_bytes(blob)
+                if perfetto_local_trace.stat().st_size == 0:
+                    raise SystemExit("perfetto trace is empty")
+                print(f"Perfetto: pulled trace -> {perfetto_local_trace}")
+
+                if args.perfetto_android_power:
+                    try:
+                        parse_perfetto_android_power_counters(
+                            perfetto_local_trace,
+                            out_dir=report_dir,
+                            label=f"{run_id}_{args.scenario}",
+                            no_timeseries=False,
+                        )
+                    except Exception as e:
+                        raise SystemExit(f"parse_perfetto_android_power_counters failed: {e}")
+                    print("Perfetto: parsed android.power -> perfetto_android_power_summary.csv + timeseries.csv")
+
+                if args.perfetto_policy_trace:
+                    try:
+                        parse_perfetto_policy_markers(perfetto_local_trace, out_dir=report_dir)
+                    except Exception as e:
+                        raise SystemExit(f"parse_perfetto_policy_markers failed: {e}")
+
+                # Best-effort cleanup.
+                adb_shell(adb_path, serial_used, ["rm", "-f", perfetto_remote_out], timeout_s=10.0)
+
+            # Capture END proto after sampling (before enrich/report is fine).
+            if args.batterystats_proto:
+                bs_end_pb = report_dir / "batterystats_end.pb"
+                rc, blob, err = adb_exec_out(adb_path, serial_used, ["dumpsys", "batterystats", "--proto"], timeout_s=30.0)
+                if rc != 0:
+                    raise SystemExit(f"batterystats --proto (end) failed: {err}")
+                bs_end_pb.write_bytes(blob)
+        finally:
+            if cpu_load_started:
                 try:
-                    parse_perfetto_policy_markers(perfetto_local_trace, out_dir=report_dir)
-                except Exception as e:
-                    raise SystemExit(f"parse_perfetto_policy_markers failed: {e}")
-
-            # Best-effort cleanup.
-            adb_shell(adb_path, args.serial, ["rm", "-f", perfetto_remote_out], timeout_s=10.0)
-
-        # Capture END proto after sampling (before enrich/report is fine).
-        if args.batterystats_proto:
-            bs_end_pb = report_dir / "batterystats_end.pb"
-            rc, blob, err = adb_exec_out(adb_path, args.serial, ["dumpsys", "batterystats", "--proto"], timeout_s=30.0)
-            if rc != 0:
-                raise SystemExit(f"batterystats --proto (end) failed: {err}")
-            bs_end_pb.write_bytes(blob)
+                    _cpu_load_stop(adb_path, serial_used)
+                except Exception:
+                    # best-effort cleanup; do not mask primary errors
+                    pass
+            if want_perfetto and perfetto_proc is not None and perfetto_proc.poll() is None:
+                # Avoid leaving perfetto running if sampling failed.
+                try:
+                    perfetto_proc.kill()
+                except Exception:
+                    pass
 
     # 4) Enrich
     enriched_csv = run_csv.with_name(run_csv.stem + "_enriched.csv")

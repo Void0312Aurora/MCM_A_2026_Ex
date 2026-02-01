@@ -1,0 +1,468 @@
+from __future__ import annotations
+
+import argparse
+import json
+import math
+from dataclasses import asdict, dataclass
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+
+
+@dataclass
+class ThermalParams:
+    # dT/dt = a*(T - T_amb) + b*P_heat_W
+    # where a < 0, tau = -1/a
+    a_per_s: float
+    b_C_per_J: float
+    t_amb_C: float
+
+
+@dataclass
+class ModelParamsV2:
+    # Electrical power model
+    p_base_mW: float
+    k_screen: float
+    k_cpu: float
+    k_leak_mW: float
+    leak_gamma_per_C: float
+    leak_tref_C: float
+
+    # GPS offset applied when GPS is OFF (estimated from A/B residual; expected <= 0)
+    k_gps_off_mW: float
+
+    # Cellular offset (estimated from A/B residual)
+    k_cellular_off_mW: float
+
+    # Battery capacity
+    c_eff_mAh: float
+
+
+def _col_num(df: pd.DataFrame, col: str, default: float = 0.0) -> pd.Series:
+    s = df[col] if col in df.columns else pd.Series(default, index=df.index)
+    return pd.to_numeric(s, errors="coerce")
+
+
+def _ridge_fit(X: np.ndarray, y: np.ndarray, alpha: float) -> np.ndarray:
+    n = X.shape[1]
+    A = X.T @ X + alpha * np.eye(n)
+    b = X.T @ y
+    return np.linalg.solve(A, b)
+
+
+def fit_thermal_1state(df_run: pd.DataFrame) -> ThermalParams:
+    """Fit a simple 1st-order thermal model using CPU temperature as observation.
+
+    Model: dT/dt = a*(T - T_amb) + b*P_heat_W
+    We set T_amb as the minimum observed T in-run (robust ambient proxy).
+    """
+
+    df = df_run.sort_values("t_s").copy().reset_index(drop=True)
+    dt = _col_num(df, "dt_s", default=0.0).fillna(0.0).to_numpy(dtype=float)
+
+    t_meas = _col_num(df, "temperature_cpu_C", default=np.nan).ffill().bfill()
+    if t_meas.isna().all():
+        # Fallback: a very weak cooling, no heating response
+        return ThermalParams(a_per_s=-1.0 / 2000.0, b_C_per_J=0.0, t_amb_C=40.0)
+
+    t = t_meas.fillna(float(t_meas.median())).to_numpy(dtype=float)
+
+    # Heating proxy: CPU power estimate (mW) -> W
+    p_cpu_mW = _col_num(df, "power_cpu_mW", default=0.0).fillna(0.0).to_numpy(dtype=float)
+    p_heat_W = np.clip(p_cpu_mW, 0.0, None) / 1000.0
+
+    t_amb = float(np.nanmin(t))
+    if not np.isfinite(t_amb):
+        t_amb = float(np.nanmedian(t)) if np.isfinite(np.nanmedian(t)) else 40.0
+
+    # Build regression for dT/dt using finite differences
+    # z_i = (T_{i+1}-T_i)/dt_i
+    # x1_i = (T_i - T_amb)
+    # x2_i = P_heat_W_i
+    z = []
+    x1 = []
+    x2 = []
+
+    for i in range(len(t) - 1):
+        dti = float(dt[i])
+        if not np.isfinite(dti) or dti <= 0:
+            continue
+        dT = float(t[i + 1] - t[i])
+        z.append(dT / dti)
+        x1.append(float(t[i] - t_amb))
+        x2.append(float(p_heat_W[i]))
+
+    if len(z) < 10:
+        return ThermalParams(a_per_s=-1.0 / 2000.0, b_C_per_J=0.0, t_amb_C=t_amb)
+
+    Z = np.asarray(z, dtype=float)
+    X = np.column_stack([np.asarray(x1, dtype=float), np.asarray(x2, dtype=float)])
+
+    # Ridge to stabilize (since x1 and x2 can be correlated)
+    alpha = 1e-3
+    beta = _ridge_fit(X, Z, alpha=alpha)
+
+    a = float(beta[0])
+    b = float(beta[1])
+
+    # Enforce physically plausible signs: a <= 0, b >= 0
+    if not np.isfinite(a) or a >= -1e-6:
+        a = -1.0 / 2000.0
+    if not np.isfinite(b) or b < 0:
+        b = 0.0
+
+    return ThermalParams(a_per_s=a, b_C_per_J=b, t_amb_C=t_amb)
+
+
+def simulate_temperature_1state(df_run: pd.DataFrame, th: ThermalParams) -> pd.Series:
+    df = df_run.sort_values("t_s").copy().reset_index(drop=True)
+    dt = _col_num(df, "dt_s", default=0.0).fillna(0.0).to_numpy(dtype=float)
+
+    t_meas = _col_num(df, "temperature_cpu_C", default=np.nan).ffill().bfill()
+    t0 = float(t_meas.dropna().iloc[0]) if t_meas.notna().any() else th.t_amb_C
+
+    p_cpu_mW = _col_num(df, "power_cpu_mW", default=0.0).fillna(0.0).to_numpy(dtype=float)
+    p_heat_W = np.clip(p_cpu_mW, 0.0, None) / 1000.0
+
+    t_hat = [t0]
+    for i in range(len(df) - 1):
+        dti = float(dt[i])
+        if not np.isfinite(dti) or dti <= 0:
+            t_hat.append(t_hat[-1])
+            continue
+
+        Ti = float(t_hat[-1])
+        dTdt = th.a_per_s * (Ti - th.t_amb_C) + th.b_C_per_J * float(p_heat_W[i])
+        t_next = Ti + dTdt * dti
+        t_hat.append(float(t_next))
+
+    return pd.Series(t_hat, index=df.index, dtype=float)
+
+
+def fit_power_model_v2(
+    all_df: pd.DataFrame,
+    alpha: float,
+    leak_gamma_per_C: float,
+) -> tuple[ModelParamsV2, pd.DataFrame, pd.DataFrame]:
+    """Two-stage fit:
+    1) Fit thermal per-run, simulate T_hat
+    2) Fit electrical power model on GPS-OFF rows (intercept + screen + cpu + leak(T_hat))
+    3) Estimate k_gps from S4 vs S4-1 residual means (nonnegative)
+    """
+
+    df = all_df.copy()
+    df["dt_s"] = _col_num(df, "dt_s", default=0.0).fillna(0.0)
+    df = df[df["dt_s"] > 0]
+
+    df["power_total_mW"] = _col_num(df, "power_total_mW", default=np.nan)
+    df = df[df["power_total_mW"].notna()]
+
+    df["power_screen_mW"] = _col_num(df, "power_screen_mW", default=0.0).fillna(0.0)
+    df["power_cpu_mW"] = _col_num(df, "power_cpu_mW", default=0.0).fillna(0.0)
+    df["is_gps_on"] = _col_num(df, "is_gps_on", default=0.0).fillna(0.0)
+    df["cellular_on"] = _col_num(df, "cellular_on", default=1.0).fillna(1.0)
+
+    # Per-run thermal fit + simulation
+    thermal_rows = []
+    t_hat_all = []
+    for run_name, g in df.groupby("run_name"):
+        th = fit_thermal_1state(g)
+        t_hat = simulate_temperature_1state(g, th)
+        tmp = g.sort_values("t_s").copy().reset_index(drop=True)
+        tmp["temp_cpu_hat_C"] = t_hat.to_numpy(dtype=float)
+        t_hat_all.append(tmp)
+
+        tau = float(-1.0 / th.a_per_s) if th.a_per_s < 0 else float("inf")
+        thermal_rows.append(
+            {
+                "run_name": run_name,
+                "t_amb_C": th.t_amb_C,
+                "a_per_s": th.a_per_s,
+                "b_C_per_J": th.b_C_per_J,
+                "tau_s": tau,
+            }
+        )
+
+    df2 = pd.concat(t_hat_all, ignore_index=True)
+    thermal_df = pd.DataFrame(thermal_rows).sort_values("run_name")
+
+    # Leak feature from simulated temp (structured: leak doubles ~ every 10C by default)
+    t_ref = float(np.nanmedian(df2["temp_cpu_hat_C"].to_numpy(dtype=float)))
+    leak_feat = np.exp(leak_gamma_per_C * (df2["temp_cpu_hat_C"].to_numpy(dtype=float) - t_ref))
+
+    # Fit base on the dominant operating point (GPS ON + cellular ON).
+    # Then apply calibrated offsets only when a subsystem is turned OFF.
+    m_gps_on = df2["is_gps_on"].to_numpy(dtype=float) >= 0.5
+    m_cell_on = df2["cellular_on"].to_numpy(dtype=float) >= 0.5
+    m_base = m_gps_on & m_cell_on
+
+    y = df2.loc[m_base, "power_total_mW"].to_numpy(dtype=float)
+    X = np.column_stack(
+        [
+            np.ones_like(y),
+            df2.loc[m_base, "power_screen_mW"].to_numpy(dtype=float),
+            df2.loc[m_base, "power_cpu_mW"].to_numpy(dtype=float),
+            leak_feat[m_base],
+        ]
+    ).astype(float)
+
+    beta = _ridge_fit(X, y, alpha=alpha)
+
+    # Base prediction (without GPS)
+    p_base = float(beta[0])
+    k_screen = float(beta[1])
+    k_cpu = float(beta[2])
+    k_leak = float(beta[3])
+
+    p0 = (
+        p_base
+        + k_screen * df2["power_screen_mW"].to_numpy(dtype=float)
+        + k_cpu * df2["power_cpu_mW"].to_numpy(dtype=float)
+        + k_leak * leak_feat
+    )
+
+    # GPS offset from A/B residual mean: prefer S4 (GPS OFF) and S4-1 (GPS ON) if present.
+    df2["p0_pred_mW"] = p0
+    df2["resid0_mW"] = df2["power_total_mW"] - df2["p0_pred_mW"]
+
+    def _run_mean_resid(run: str) -> float | None:
+        m = df2["run_name"].astype(str).eq(run)
+        if m.sum() == 0:
+            return None
+        return float(df2.loc[m, "resid0_mW"].mean())
+
+    r_s4 = _run_mean_resid("20260201_213514_S4")
+    r_s41 = _run_mean_resid("20260201_215338_S4-1")
+
+    if r_s4 is not None and r_s41 is not None:
+        # Offset applied only when GPS is OFF.
+        k_gps_off = float(r_s4 - r_s41)
+        k_gps_off = min(0.0, k_gps_off)
+        gps_source = "S4_minus_S4-1"
+    else:
+        k_gps_off = 0.0
+        gps_source = "none"
+
+    # Cellular offset from S1 A/B residual means (if present).
+    # We assume S1-HS-1 is cellular ON and S1-HS-2 is cellular OFF per configs/scenario_params.csv.
+    def _run_mean_resid_cell(run: str) -> float | None:
+        m = df2["run_name"].astype(str).eq(run)
+        if m.sum() == 0:
+            return None
+        return float(df2.loc[m, "resid0_mW"].mean())
+
+    r_s1_on = _run_mean_resid_cell("20260131_230812_S1-HS-1")
+    r_s1_off = _run_mean_resid_cell("20260201_174510_S1-HS-2")
+    if r_s1_on is not None and r_s1_off is not None:
+        # Offset applied only when cellular is OFF.
+        # If cellular OFF reduces power, residual on the OFF run is negative.
+        k_cell_off = float(r_s1_off - r_s1_on)
+        k_cell_off = min(0.0, k_cell_off)  # enforce: cellular-off should not increase power
+        cell_source = "S1-HS-2_minus_S1-HS-1"
+    else:
+        k_cell_off = 0.0
+        cell_source = "none"
+
+    df2["power_pred_mW"] = (
+        df2["p0_pred_mW"]
+        + k_gps_off * (1.0 - df2["is_gps_on"].to_numpy(dtype=float))
+        + k_cell_off * (1.0 - df2["cellular_on"].to_numpy(dtype=float))
+    )
+    df2["gps_fit_source"] = gps_source
+    df2["cell_fit_source"] = cell_source
+
+    params = ModelParamsV2(
+        p_base_mW=p_base,
+        k_screen=k_screen,
+        k_cpu=k_cpu,
+        k_leak_mW=k_leak,
+        leak_gamma_per_C=float(leak_gamma_per_C),
+        leak_tref_C=float(t_ref),
+        k_gps_off_mW=float(k_gps_off),
+        k_cellular_off_mW=float(k_cell_off),
+        c_eff_mAh=4410.0,
+    )
+
+    return params, df2, thermal_df
+
+
+def simulate_soc(df_run: pd.DataFrame, c_eff_mAh: float) -> pd.DataFrame:
+    df = df_run.sort_values("t_s").copy().reset_index(drop=True)
+    dt = _col_num(df, "dt_s", default=0.0).fillna(0.0).to_numpy(dtype=float)
+
+    v = _col_num(df, "voltage_mV", default=np.nan) / 1000.0
+    v = v.ffill().bfill().fillna(float(v.median()) if v.notna().any() else 3.85).to_numpy(dtype=float)
+
+    p = _col_num(df, "power_pred_mW", default=np.nan).ffill().bfill().to_numpy(dtype=float)
+
+    soc_meas = _col_num(df, "soc_pct", default=np.nan)
+    soc0 = float(soc_meas.dropna().iloc[0]) / 100.0 if soc_meas.notna().any() else 0.5
+
+    denom = 3600.0 * float(c_eff_mAh)
+    soc = [soc0]
+    for i in range(len(df) - 1):
+        dti = float(dt[i])
+        if not np.isfinite(dti) or dti <= 0:
+            soc.append(soc[-1])
+            continue
+
+        vi = float(v[i])
+        if not np.isfinite(vi) or vi <= 0:
+            vi = 3.85
+
+        pi = float(p[i])
+        dsoc = (pi / (vi * denom)) * dti
+        soc_next = soc[-1] - dsoc
+        soc_next = min(1.0, max(0.0, soc_next))
+        soc.append(soc_next)
+
+    df["soc_sim"] = np.asarray(soc, dtype=float)
+    df["soc_sim_pct"] = df["soc_sim"] * 100.0
+    return df
+
+
+def validate(df_all: pd.DataFrame, out_dir: Path, c_eff_mAh: float) -> pd.DataFrame:
+    rows = []
+    for run_name, g in df_all.groupby("run_name"):
+        sim = simulate_soc(g, c_eff_mAh=c_eff_mAh)
+
+        soc_meas = _col_num(sim, "soc_pct", default=np.nan)
+        soc_sim = _col_num(sim, "soc_sim_pct", default=np.nan)
+        m = soc_meas.notna() & soc_sim.notna()
+        if m.sum() == 0:
+            continue
+
+        err = (soc_sim[m] - soc_meas[m]).to_numpy(dtype=float)
+        rmse = float(np.sqrt(np.mean(err**2)))
+        mape = float(np.mean(np.abs(err) / np.clip(np.abs(soc_meas[m].to_numpy(dtype=float)), 1e-6, None)) * 100.0)
+
+        duration_s = float(_col_num(sim, "dt_s", default=0.0).fillna(0.0).sum())
+
+        rows.append(
+            {
+                "run_name": run_name,
+                "n_samples": int(len(sim)),
+                "duration_s": duration_s,
+                "soc_initial": float(soc_meas.dropna().iloc[0]) if soc_meas.notna().any() else np.nan,
+                "soc_final_meas": float(soc_meas.dropna().iloc[-1]) if soc_meas.notna().any() else np.nan,
+                "soc_final_sim": float(soc_sim.dropna().iloc[-1]) if soc_sim.notna().any() else np.nan,
+                "rmse_soc_pct": rmse,
+                "mape_soc_pct": mape,
+                "p_meas_mean_mW": float(_col_num(sim, "power_total_mW", default=np.nan).dropna().mean()),
+                "p_pred_mean_mW": float(_col_num(sim, "power_pred_mW", default=np.nan).dropna().mean()),
+            }
+        )
+
+    val = pd.DataFrame(rows).sort_values("run_name")
+    val.to_csv(out_dir / "model_validation_v2.csv", index=False, encoding="utf-8")
+
+    # Plot measured vs predicted mean power per run
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    if not val.empty:
+        fig, ax = plt.subplots(figsize=(10, 6))
+        x = val["p_meas_mean_mW"].to_numpy(dtype=float)
+        y = val["p_pred_mean_mW"].to_numpy(dtype=float)
+        ax.scatter(x, y)
+        lo = float(np.nanmin([x.min(), y.min()]))
+        hi = float(np.nanmax([x.max(), y.max()]))
+        ax.plot([lo, hi], [lo, hi], linestyle="--", color="gray")
+        ax.set_xlabel("Measured mean power (mW)")
+        ax.set_ylabel("Predicted mean power (mW)")
+        ax.set_title("Power model validation v2 (per-run mean)")
+        ax.grid(True, alpha=0.3)
+        fig.tight_layout()
+        fig.savefig(out_dir / "model_validation_v2.png", dpi=150)
+
+    return val
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description="v2: 1-state thermal model + structured leak + GPS A/B calibration")
+    ap.add_argument(
+        "--input",
+        type=Path,
+        default=Path("artifacts/models/all_runs_model_input.csv"),
+        help="Model input CSV generated by scripts/model_preprocess.py",
+    )
+    ap.add_argument(
+        "--out-dir",
+        type=Path,
+        default=Path("artifacts/models"),
+        help="Output dir",
+    )
+    ap.add_argument(
+        "--alpha",
+        type=float,
+        default=2000.0,
+        help="Ridge strength for base power fit (GPS-OFF only)",
+    )
+    ap.add_argument(
+        "--c-eff-mAh",
+        type=float,
+        default=4410.0,
+        help="Effective capacity (mAh) used in SOC ODE",
+    )
+    ap.add_argument(
+        "--leak-doubling-C",
+        type=float,
+        default=10.0,
+        help="Leakage doubles every N degrees C (Arrhenius-inspired prior)",
+    )
+
+    args = ap.parse_args()
+
+    all_df = pd.read_csv(args.input)
+
+    leak_gamma = math.log(2.0) / float(args.leak_doubling_C)
+
+    params, df_pred, thermal_df = fit_power_model_v2(all_df, alpha=float(args.alpha), leak_gamma_per_C=leak_gamma)
+    params.c_eff_mAh = float(args.c_eff_mAh)
+
+    args.out_dir.mkdir(parents=True, exist_ok=True)
+
+    (args.out_dir / "model_params_v2.json").write_text(
+        json.dumps(asdict(params), ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
+    thermal_df.to_csv(args.out_dir / "thermal_fit_v2.csv", index=False, encoding="utf-8")
+
+    validate(df_pred, out_dir=args.out_dir, c_eff_mAh=params.c_eff_mAh)
+
+    # Save a thin per-sample dump for debugging A/B and thermal
+    keep_cols = [
+        "run_name",
+        "t_s",
+        "dt_s",
+        "soc_pct",
+        "voltage_mV",
+        "temperature_cpu_C",
+        "temp_cpu_hat_C",
+        "power_total_mW",
+        "power_cpu_mW",
+        "power_screen_mW",
+        "is_gps_on",
+        "cellular_on",
+        "p0_pred_mW",
+        "power_pred_mW",
+        "resid0_mW",
+        "gps_fit_source",
+        "cell_fit_source",
+    ]
+    cols = [c for c in keep_cols if c in df_pred.columns]
+    df_pred[cols].to_csv(args.out_dir / "model_samples_v2.csv", index=False, encoding="utf-8")
+
+    print(f"Wrote: {args.out_dir / 'model_params_v2.json'}")
+    print(f"Wrote: {args.out_dir / 'thermal_fit_v2.csv'}")
+    print(f"Wrote: {args.out_dir / 'model_validation_v2.csv'}")
+    print(f"Wrote: {args.out_dir / 'model_validation_v2.png'}")
+    print(f"Wrote: {args.out_dir / 'model_samples_v2.csv'}")
+
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -95,6 +95,16 @@ def _get_system_setting(adb: str, serial: str | None, key: str) -> str | None:
     return s
 
 
+def _screen_sleep(adb: str, serial: str | None) -> None:
+    # KEYCODE_SLEEP = 223
+    adb_shell(adb, serial, ["input", "keyevent", "223"], timeout_s=8.0)
+
+
+def _screen_wake(adb: str, serial: str | None) -> None:
+    # KEYCODE_WAKEUP = 224
+    adb_shell(adb, serial, ["input", "keyevent", "224"], timeout_s=8.0)
+
+
 def _cpu_load_start(adb: str, serial: str | None, threads: int) -> None:
     """Start best-effort CPU busy-loop workers on device and record their PIDs.
 
@@ -246,6 +256,25 @@ def main() -> int:
     )
 
     parser.add_argument(
+        "--screen-wake-before",
+        action="store_true",
+        help="Best-effort wake screen before sampling (adb input keyevent WAKEUP).",
+    )
+    parser.add_argument(
+        "--screen-sleep-before",
+        action="store_true",
+        help="Best-effort force screen off before sampling (adb input keyevent SLEEP).",
+    )
+    parser.add_argument(
+        "--auto-reset-settings",
+        action="store_true",
+        help=(
+            "If brightness/timeout were set via --set-brightness/--set-timeout-ms, restore prior "
+            "screen_brightness/mode/timeout after the run (best-effort)."
+        ),
+    )
+
+    parser.add_argument(
         "--qc",
         action="store_true",
         help="After enrich, run qc/qc_run.py on the enriched CSV (prints quick acceptance stats).",
@@ -326,6 +355,9 @@ def main() -> int:
     parser.add_argument("--run-csv", type=Path, default=None, help="Existing run CSV when --skip-sample")
     args = parser.parse_args()
 
+    if args.screen_sleep_before and args.screen_wake_before:
+        raise SystemExit("--screen-sleep-before and --screen-wake-before are mutually exclusive")
+
     if args.set_brightness is not None and not (0 <= int(args.set_brightness) <= 255):
         raise SystemExit("--set-brightness must be in [0, 255]")
     if args.set_timeout_ms is not None and int(args.set_timeout_ms) <= 0:
@@ -390,6 +422,18 @@ def main() -> int:
             if not serial_used:
                 raise SystemExit("No adb devices found. Provide --serial or connect a device.")
             print(f"Using default adb serial: {serial_used}")
+
+        # Best-effort screen state control to avoid S2 brightness leaking into later runs.
+        if args.screen_wake_before:
+            try:
+                _screen_wake(adb_path, serial_used)
+            except Exception:
+                pass
+        if args.screen_sleep_before:
+            try:
+                _screen_sleep(adb_path, serial_used)
+            except Exception:
+                pass
         perfetto_proc: subprocess.Popen[bytes] | None = None
         perfetto_remote_cfg: str | None = None
         perfetto_remote_out: str | None = None
@@ -503,10 +547,18 @@ def main() -> int:
                 raise SystemExit(f"batterystats --reset failed: {err or out}")
 
         # Optional: set brightness/timeout before sampling (useful for S2 brightness steps).
+        restore_settings: dict[str, str | None] | None = None
         if args.set_brightness is not None or args.set_timeout_ms is not None:
             try:
                 if args.enable_write_settings:
                     _ensure_write_settings(adb_path, serial_used)
+
+                if args.auto_reset_settings:
+                    restore_settings = {
+                        "screen_brightness": _get_system_setting(adb_path, serial_used, "screen_brightness"),
+                        "screen_brightness_mode": _get_system_setting(adb_path, serial_used, "screen_brightness_mode"),
+                        "screen_off_timeout": _get_system_setting(adb_path, serial_used, "screen_off_timeout"),
+                    }
 
                 if args.set_brightness is not None:
                     # Enforce manual mode for rigorous S2.
@@ -641,6 +693,22 @@ def main() -> int:
                 # Avoid leaving perfetto running if sampling failed.
                 try:
                     perfetto_proc.kill()
+                except Exception:
+                    pass
+
+            # Best-effort settings restore.
+            if restore_settings is not None:
+                try:
+                    if args.enable_write_settings:
+                        _ensure_write_settings(adb_path, serial_used)
+                    for k, v in restore_settings.items():
+                        if v is None:
+                            continue
+                        _set_system_setting(adb_path, serial_used, k, int(v))
+                    b = _get_system_setting(adb_path, serial_used, "screen_brightness")
+                    m = _get_system_setting(adb_path, serial_used, "screen_brightness_mode")
+                    t = _get_system_setting(adb_path, serial_used, "screen_off_timeout")
+                    print(f"Restored settings: screen_brightness={b} mode={m} timeout_ms={t}")
                 except Exception:
                     pass
 

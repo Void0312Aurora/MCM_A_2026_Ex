@@ -1,0 +1,10 @@
+{
+  "p_base": 100,
+  "temp_ref": NaN,
+  "screen_slope": 0,
+  "screen_offset": 0,
+  "c_eff": 4410,
+  "cpu_coeff": 1.0,
+  "leak_coeff": 0.02,
+  "leak_baseline": 50
+}

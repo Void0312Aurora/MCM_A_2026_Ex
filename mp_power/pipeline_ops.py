@@ -833,8 +833,19 @@ def enrich_run_with_cpu_energy(
                 row["dt_s"] = dt_s
 
                 row["screen_brightness_norm"] = f"{brightness_norm:.6f}" if brightness_norm is not None else ""
+
+                # If we have an explicit display state and it is not ON, treat screen power as 0.
+                # Some devices keep the brightness setting non-zero even when the screen is off.
+                display_state = (row.get("display_state") or "").strip().upper()
+                screen_is_on = True
+                if display_state:
+                    screen_is_on = display_state == "ON"
+
                 screen_power_mw = None
-                if (
+                if not screen_is_on:
+                    screen_power_mw = 0.0
+                    row["screen_power_mW_est"] = "0.000"
+                elif (
                     voltage_mv is not None
                     and brightness_norm is not None
                     and screen_on_ma is not None

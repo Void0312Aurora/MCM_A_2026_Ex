@@ -1,0 +1,6 @@
+t_s,dt_s,soc_pct,voltage_mV,temperature_C,temperature_cpu_C,brightness,display_state,power_total_mW,power_cpu_mW,power_screen_mW,charge_counter_uAh,scenario,run_id,run_name,is_gps_on,wifi_on,cellular_on,gps_on_cfg,screen_on_cfg,brightness_target,cpu_test,brightness_norm
+0.0,0.0,33,3735,37.0,,55,OFF,,,0.0,1605000,TEST_cpu_load_t2,20260201_204458,20260201_204457_TEST_cpu_load_t2,0,1,1,,,,0,0.0
+0.0,5.0,33,3735,37.0,,55,OFF,,142.9882,0.0,1605000,TEST_cpu_load_t2,20260201_204458,20260201_204457_TEST_cpu_load_t2,0,1,1,,,,0,0.0
+5.0,4.0,33,3735,37.0,,55,OFF,,176.10775,0.0,1605000,TEST_cpu_load_t2,20260201_204458,20260201_204457_TEST_cpu_load_t2,0,1,1,,,,0,0.0
+9.0,3.0,33,3735,37.0,,55,OFF,,356.05899999999997,0.0,1605000,TEST_cpu_load_t2,20260201_204458,20260201_204457_TEST_cpu_load_t2,0,1,1,,,,0,0.0
+12.0,6.0,33,3735,37.0,,55,OFF,,115.44033333333334,0.0,1605000,TEST_cpu_load_t2,20260201_204458,20260201_204457_TEST_cpu_load_t2,0,1,1,,,,0,0.0

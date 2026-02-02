@@ -26,6 +26,9 @@
 - 建议全程保持 **亮屏 + 已解锁**，并停留在同一静态页面（避免因“熄屏/唤醒回到锁屏界面”引入状态切换）。
 - 若使用 `--set-brightness/--set-timeout-ms`（S2），建议配合 `--auto-reset-settings`，避免“上一亮度遗留”影响后续场景。
 - 若要更干净地识别 GPS A/B（S4 vs S4-1），建议将 GPS 场景放在 CPU 满载梯度之前执行，减少温度/系统状态漂移。
+- 注意：`--cpu-load-threads` 通过 `adb shell` 在手机上启动后台负载进程。对部分机型（尤其是 **无线调试 mDNS serial**）可能出现 adb 卡死/超时，导致 CPU 场景被跳过。
+	- 更可靠做法：CPU 场景建议走 **USB 调试**，或用 `adb connect <ip>:<port>` 让 serial 变成 `ip:port`（通常比 mDNS 稳定）。
+	- 若你在批量脚本里不希望因为 CPU load 失败而中断后续场景，可加 `--cpu-load-best-effort`（会继续跑，但会在 report 目录写 `cpu_load_start_failed.txt` 作为标记）。
 - 每次 run 之间留出冷却/回温时间（或至少记录起始温度）。
 - 随机化顺序：不要总是从低亮到高亮（避免温度漂移带来系统性偏差）。
 

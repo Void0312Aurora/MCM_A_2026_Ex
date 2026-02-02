@@ -1,0 +1,4 @@
+timestamp=2026-02-02 21:49:33
+serial=adb-4LQWV47DYXT4GQSW-j7FoVL (2)._adb-tls-connect._tcp
+brightness_mode=0
+screen_brightness=55

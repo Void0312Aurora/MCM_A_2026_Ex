@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import re
 import subprocess
+import tempfile
 from datetime import datetime
 from pathlib import Path
 
@@ -14,7 +15,10 @@ from mp_power.adb import adb_exec_out
 from mp_power.adb import adb_shell
 from mp_power.adb import pick_default_serial
 from mp_power.adb import resolve_adb
+from mp_power.adb import run_adb
 from mp_power.adb import shell_ok
+from mp_power.cpu_load import cpu_load_start as _cpu_load_start_shared
+from mp_power.cpu_load import cpu_load_stop as _cpu_load_stop_shared
 from mp_power.pipeline_ops import enrich_run_with_cpu_energy
 from mp_power.pipeline_ops import parse_perfetto_android_power_counters
 from mp_power.pipeline_ops import parse_perfetto_policy_markers
@@ -106,77 +110,11 @@ def _screen_wake(adb: str, serial: str | None) -> None:
 
 
 def _cpu_load_start(adb: str, serial: str | None, threads: int) -> None:
-    """Start best-effort CPU busy-loop workers on device and record their PIDs.
-
-    This is intentionally simple and dependency-free (no root, no extra binaries).
-    """
-
-    threads = int(threads)
-    if threads <= 0:
-        return
-
-    # Store PIDs so we can stop reliably even if process names differ across devices.
-    pid_file = "/data/local/tmp/mp_power_cpu_load.pids"
-    # Start gradually and (if possible) with lower priority so adb shell itself still gets CPU time.
-    # Give each worker a distinctive $0 argv marker so we can pkill it even if the pid file is missing.
-    script = (
-        # Pre-clean leftovers from previous aborted runs.
-        "HAS_PKILL=0; command -v pkill >/dev/null 2>&1 && HAS_PKILL=1; "
-        "if [ -f " + pid_file + " ]; then "
-        "  for p in $(cat " + pid_file + "); do kill $p >/dev/null 2>&1; done; "
-        "  sleep 0.1; "
-        "  for p in $(cat " + pid_file + "); do kill -9 $p >/dev/null 2>&1; done; "
-        "  rm -f " + pid_file + "; "
-        "fi; "
-        "if [ $HAS_PKILL -eq 1 ]; then pkill -f mp_power_cpu_load_worker >/dev/null 2>&1 || true; fi; "
-        # Start new workers.
-        "PIDS=; i=0; "
-        "HAS_NICE=0; command -v nice >/dev/null 2>&1 && HAS_NICE=1; "
-        f"while [ $i -lt {threads} ]; do "
-        "  TAG=mp_power_cpu_load_worker_$i; "
-        "  if [ $HAS_NICE -eq 1 ]; then "
-        "    (nice -n 10 sh -c 'while true; do :; done' $TAG) >/dev/null 2>&1 & "
-        "  else "
-        "    (sh -c 'while true; do :; done' $TAG) >/dev/null 2>&1 & "
-        "  fi; "
-        "  PIDS=\"$PIDS $!\"; "
-        "  i=$((i+1)); "
-        "  sleep 0.05; "
-        "done; "
-        f"echo $PIDS > {pid_file}; "
-        "echo started:$PIDS"
-    )
-
-    rc, out, err = adb_shell(adb, serial, ["sh", "-c", script], timeout_s=60.0)
-    if rc != 0:
-        raise RuntimeError((err or out).strip() or "failed to start cpu load")
-    print(f"CPU load: started threads={threads} (pid_file={pid_file})")
+    _cpu_load_start_shared(adb, serial, threads)
 
 
 def _cpu_load_stop(adb: str, serial: str | None) -> None:
-    """Stop CPU load workers previously started by _cpu_load_start (best-effort)."""
-
-    pid_file = "/data/local/tmp/mp_power_cpu_load.pids"
-    script = (
-        "HAS_PKILL=0; command -v pkill >/dev/null 2>&1 && HAS_PKILL=1; "
-        f"if [ -f {pid_file} ]; then "
-        f"  PIDS=\"$(cat {pid_file})\"; "
-        "  for p in $PIDS; do kill $p >/dev/null 2>&1; done; "
-        "  sleep 0.1; "
-        "  for p in $PIDS; do kill -9 $p >/dev/null 2>&1; done; "
-        f"  rm -f {pid_file}; "
-        "fi; "
-        # Fallback cleanup if pid file is missing/stale.
-        "if [ $HAS_PKILL -eq 1 ]; then "
-        "  pkill -f mp_power_cpu_load_worker >/dev/null 2>&1 || true; "
-        "  pkill -f mp_power_cpu_load\\.pids >/dev/null 2>&1 || true; "
-        "fi; "
-        "echo stopped"
-    )
-    rc, out, err = adb_shell(adb, serial, ["sh", "-c", script], timeout_s=60.0)
-    if rc != 0:
-        raise RuntimeError((err or out).strip() or "failed to stop cpu load")
-    print("CPU load: stopped")
+    _cpu_load_stop_shared(adb, serial)
 
 
 def main() -> int:
@@ -233,6 +171,24 @@ def main() -> int:
         help=(
             "If >0, start N simple busy-loop CPU workers on device for the whole run window and stop them after. "
             "Useful for S3 CPU负载实验. (best-effort, no root)"
+        ),
+    )
+
+    parser.add_argument(
+        "--cpu-load-best-effort",
+        action="store_true",
+        help=(
+            "Do not abort the run if CPU load workers fail to start (prints WARN and continues sampling). "
+            "A diagnostic file will be written under the run report directory."
+        ),
+    )
+
+    parser.add_argument(
+        "--cpu-load-smoke",
+        action="store_true",
+        help=(
+            "Only start and stop CPU load workers and exit (for debugging). "
+            "Use with --cpu-load-threads. Does not sample/enrich/report."
         ),
     )
 
@@ -368,6 +324,22 @@ def main() -> int:
         import sys
 
         py = sys.executable
+
+    # Debug utility: smoke-test CPU load start/stop without running a full sampling window.
+    if args.cpu_load_smoke:
+        adb_path = resolve_adb(args.adb)
+        serial_used = args.serial
+        if not serial_used:
+            serial_used = pick_default_serial(adb_path, timeout_s=8.0)
+        if not serial_used:
+            raise SystemExit("No adb devices found. Provide --serial or connect a device.")
+        if not args.cpu_load_threads or int(args.cpu_load_threads) <= 0:
+            raise SystemExit("--cpu-load-smoke requires --cpu-load-threads > 0")
+        print(f"CPU load smoke: serial={serial_used} threads={int(args.cpu_load_threads)}")
+        _cpu_load_start(adb_path, serial_used, int(args.cpu_load_threads))
+        _cpu_load_stop(adb_path, serial_used)
+        print("CPU load smoke: OK")
+        return 0
 
     # 1) Ensure power_profile parsed (and includes optional items_ma for screen estimate)
     pp_json = args.profile_out_dir / "power_profile.json"
@@ -583,8 +555,19 @@ def main() -> int:
         cpu_load_started = False
         try:
             if args.cpu_load_threads and int(args.cpu_load_threads) > 0:
-                _cpu_load_start(adb_path, serial_used, int(args.cpu_load_threads))
-                cpu_load_started = True
+                try:
+                    _cpu_load_start(adb_path, serial_used, int(args.cpu_load_threads))
+                    cpu_load_started = True
+                except Exception as e:
+                    if args.cpu_load_best_effort:
+                        msg = f"WARN: cpu load not started; continuing without cpu load. Details: {e}"
+                        print(msg)
+                        try:
+                            (report_dir / "cpu_load_start_failed.txt").write_text(msg + "\n", encoding="utf-8")
+                        except Exception:
+                            pass
+                    else:
+                        raise
 
             sample_cmd = [
                 py,

@@ -20,6 +20,21 @@ class ThermalParams:
 
 
 @dataclass
+class ThermalParams2:
+    # 2-state model using CPU and battery temperatures as observed signals.
+    #
+    # dT_cpu/dt  = a_cpu*(T_cpu - T_batt) + b_cpu*P_heat_W
+    # dT_batt/dt = a_batt*(T_batt - T_amb) + b_couple*(T_cpu - T_batt)
+    #
+    # Constraints: a_cpu<=0, b_cpu>=0, a_batt<=0, b_couple>=0
+    a_cpu_per_s: float
+    b_cpu_C_per_J: float
+    a_batt_per_s: float
+    b_couple_per_s: float
+    t_amb_C: float
+
+
+@dataclass
 class ModelParamsV2:
     # Electrical power model
     p_base_mW: float
@@ -140,10 +155,168 @@ def simulate_temperature_1state(df_run: pd.DataFrame, th: ThermalParams) -> pd.S
     return pd.Series(t_hat, index=df.index, dtype=float)
 
 
+def fit_thermal_2state(df_run: pd.DataFrame) -> ThermalParams2:
+    """Fit a simple 2-state thermal model using CPU + battery temperature observations.
+
+    This targets a fast component (CPU) plus a slow component (battery/body), which
+    is often needed to explain within-run drift as the device warms.
+    """
+
+    df = df_run.sort_values("t_s").copy().reset_index(drop=True)
+    dt = _col_num(df, "dt_s", default=0.0).fillna(0.0).to_numpy(dtype=float)
+
+    t_cpu_s = _col_num(df, "temperature_cpu_C", default=np.nan).ffill().bfill()
+    t_batt_s = _col_num(df, "temperature_C", default=np.nan).ffill().bfill()
+
+    if t_cpu_s.isna().all() or t_batt_s.isna().all():
+        t_amb = float(np.nanmedian(t_cpu_s.to_numpy(dtype=float))) if t_cpu_s.notna().any() else 40.0
+        return ThermalParams2(
+            a_cpu_per_s=-1.0 / 200.0,
+            b_cpu_C_per_J=0.0,
+            a_batt_per_s=-1.0 / 2000.0,
+            b_couple_per_s=0.0,
+            t_amb_C=t_amb,
+        )
+
+    t_cpu = t_cpu_s.fillna(float(t_cpu_s.median())).to_numpy(dtype=float)
+    t_batt = t_batt_s.fillna(float(t_batt_s.median())).to_numpy(dtype=float)
+
+    p_cpu_mW = _col_num(df, "power_cpu_mW", default=0.0).fillna(0.0).to_numpy(dtype=float)
+    p_heat_W = np.clip(p_cpu_mW, 0.0, None) / 1000.0
+
+    t_amb = float(np.nanmin(t_batt))
+    if not np.isfinite(t_amb):
+        t_amb = float(np.nanmedian(t_batt)) if np.isfinite(np.nanmedian(t_batt)) else 40.0
+
+    # Regression 1: dT_cpu/dt = a_cpu*(T_cpu - T_batt) + b_cpu*P
+    z1: list[float] = []
+    x1: list[float] = []
+    x2: list[float] = []
+
+    # Regression 2: dT_batt/dt = a_batt*(T_batt - T_amb) + b_couple*(T_cpu - T_batt)
+    z2: list[float] = []
+    x3: list[float] = []
+    x4: list[float] = []
+
+    for i in range(len(t_cpu) - 1):
+        dti = float(dt[i])
+        if not np.isfinite(dti) or dti <= 0:
+            continue
+
+        z1.append(float((t_cpu[i + 1] - t_cpu[i]) / dti))
+        x1.append(float(t_cpu[i] - t_batt[i]))
+        x2.append(float(p_heat_W[i]))
+
+        z2.append(float((t_batt[i + 1] - t_batt[i]) / dti))
+        x3.append(float(t_batt[i] - t_amb))
+        x4.append(float(t_cpu[i] - t_batt[i]))
+
+    if len(z1) < 10 or len(z2) < 10:
+        return ThermalParams2(
+            a_cpu_per_s=-1.0 / 200.0,
+            b_cpu_C_per_J=0.0,
+            a_batt_per_s=-1.0 / 2000.0,
+            b_couple_per_s=0.0,
+            t_amb_C=t_amb,
+        )
+
+    alpha = 1e-3
+    beta1 = _ridge_fit(
+        np.column_stack([np.asarray(x1, dtype=float), np.asarray(x2, dtype=float)]),
+        np.asarray(z1, dtype=float),
+        alpha=alpha,
+    )
+    beta2 = _ridge_fit(
+        np.column_stack([np.asarray(x3, dtype=float), np.asarray(x4, dtype=float)]),
+        np.asarray(z2, dtype=float),
+        alpha=alpha,
+    )
+
+    a_cpu = float(beta1[0])
+    b_cpu = float(beta1[1])
+    a_batt = float(beta2[0])
+    b_couple = float(beta2[1])
+
+    # Physically we only need a_cpu <= 0; values close to 0 are plausible (very weak coupling).
+    # Do NOT snap small negative values to a strong default, or hot-start runs will unrealistically
+    # cool to the battery temperature.
+    if not np.isfinite(a_cpu) or a_cpu > 0:
+        a_cpu = -1.0 / 2000.0
+    if not np.isfinite(b_cpu) or b_cpu < 0:
+        b_cpu = 0.0
+    if not np.isfinite(a_batt) or a_batt > 0:
+        a_batt = -1.0 / 5000.0
+    if not np.isfinite(b_couple) or b_couple < 0:
+        b_couple = 0.0
+
+    return ThermalParams2(
+        a_cpu_per_s=a_cpu,
+        b_cpu_C_per_J=b_cpu,
+        a_batt_per_s=a_batt,
+        b_couple_per_s=b_couple,
+        t_amb_C=t_amb,
+    )
+
+
+def simulate_temperature_2state(
+    df_run: pd.DataFrame,
+    th: ThermalParams2,
+    *,
+    leak_temp_mix_cpu: float = 0.7,
+) -> tuple[pd.Series, pd.Series, pd.Series]:
+    """Simulate 2-state temperatures.
+
+    Returns (T_cpu_hat, T_batt_hat, T_leak_hat) where T_leak_hat is a convex mix
+    used by the leakage feature.
+    """
+
+    df = df_run.sort_values("t_s").copy().reset_index(drop=True)
+    dt = _col_num(df, "dt_s", default=0.0).fillna(0.0).to_numpy(dtype=float)
+
+    t_cpu_meas = _col_num(df, "temperature_cpu_C", default=np.nan).ffill().bfill()
+    t_batt_meas = _col_num(df, "temperature_C", default=np.nan).ffill().bfill()
+
+    t_cpu0 = float(t_cpu_meas.dropna().iloc[0]) if t_cpu_meas.notna().any() else th.t_amb_C
+    t_batt0 = float(t_batt_meas.dropna().iloc[0]) if t_batt_meas.notna().any() else th.t_amb_C
+
+    p_cpu_mW = _col_num(df, "power_cpu_mW", default=0.0).fillna(0.0).to_numpy(dtype=float)
+    p_heat_W = np.clip(p_cpu_mW, 0.0, None) / 1000.0
+
+    w = float(leak_temp_mix_cpu)
+    if not np.isfinite(w):
+        w = 0.7
+    w = float(np.clip(w, 0.0, 1.0))
+
+    t_cpu_hat = [t_cpu0]
+    t_batt_hat = [t_batt0]
+    for i in range(len(df) - 1):
+        dti = float(dt[i])
+        if not np.isfinite(dti) or dti <= 0:
+            t_cpu_hat.append(t_cpu_hat[-1])
+            t_batt_hat.append(t_batt_hat[-1])
+            continue
+
+        Tcpu = float(t_cpu_hat[-1])
+        Tb = float(t_batt_hat[-1])
+        dTcpu_dt = th.a_cpu_per_s * (Tcpu - Tb) + th.b_cpu_C_per_J * float(p_heat_W[i])
+        dTb_dt = th.a_batt_per_s * (Tb - th.t_amb_C) + th.b_couple_per_s * (Tcpu - Tb)
+
+        t_cpu_hat.append(float(Tcpu + dTcpu_dt * dti))
+        t_batt_hat.append(float(Tb + dTb_dt * dti))
+
+    s_cpu = pd.Series(t_cpu_hat, index=df.index, dtype=float)
+    s_batt = pd.Series(t_batt_hat, index=df.index, dtype=float)
+    s_leak = (w * s_cpu + (1.0 - w) * s_batt).astype(float)
+    return s_cpu, s_batt, s_leak
+
+
 def fit_power_model_v2(
     all_df: pd.DataFrame,
     alpha: float,
     leak_gamma_per_C: float,
+    *,
+    thermal_model: str = "1state",
+    leak_temp_mix_cpu: float = 0.7,
 ) -> tuple[ModelParamsV2, pd.DataFrame, pd.DataFrame]:
     """Two-stage fit:
     1) Fit thermal per-run, simulate T_hat
@@ -163,33 +336,74 @@ def fit_power_model_v2(
     df["is_gps_on"] = _col_num(df, "is_gps_on", default=0.0).fillna(0.0)
     df["cellular_on"] = _col_num(df, "cellular_on", default=1.0).fillna(1.0)
 
+    thermal_model = str(thermal_model or "1state").strip().lower()
+    if thermal_model not in {"1state", "2state"}:
+        thermal_model = "1state"
+
     # Per-run thermal fit + simulation
     thermal_rows = []
     t_hat_all = []
     for run_name, g in df.groupby("run_name"):
-        th = fit_thermal_1state(g)
-        t_hat = simulate_temperature_1state(g, th)
         tmp = g.sort_values("t_s").copy().reset_index(drop=True)
-        tmp["temp_cpu_hat_C"] = t_hat.to_numpy(dtype=float)
-        t_hat_all.append(tmp)
 
-        tau = float(-1.0 / th.a_per_s) if th.a_per_s < 0 else float("inf")
-        thermal_rows.append(
-            {
-                "run_name": run_name,
-                "t_amb_C": th.t_amb_C,
-                "a_per_s": th.a_per_s,
-                "b_C_per_J": th.b_C_per_J,
-                "tau_s": tau,
-            }
-        )
+        if thermal_model == "2state":
+            th2 = fit_thermal_2state(tmp)
+            t_cpu_hat, t_batt_hat, t_leak_hat = simulate_temperature_2state(
+                tmp,
+                th2,
+                leak_temp_mix_cpu=float(leak_temp_mix_cpu),
+            )
+            tmp["temp_cpu_hat_C"] = t_cpu_hat.to_numpy(dtype=float)
+            tmp["temp_batt_hat_C"] = t_batt_hat.to_numpy(dtype=float)
+            tmp["temp_leak_hat_C"] = t_leak_hat.to_numpy(dtype=float)
+
+            tau_cpu = float(-1.0 / th2.a_cpu_per_s) if th2.a_cpu_per_s < 0 else float("inf")
+            tau_batt = float(-1.0 / th2.a_batt_per_s) if th2.a_batt_per_s < 0 else float("inf")
+            thermal_rows.append(
+                {
+                    "run_name": run_name,
+                    "thermal_model": "2state",
+                    "t_amb_C": th2.t_amb_C,
+                    "a_cpu_per_s": th2.a_cpu_per_s,
+                    "b_cpu_C_per_J": th2.b_cpu_C_per_J,
+                    "a_batt_per_s": th2.a_batt_per_s,
+                    "b_couple_per_s": th2.b_couple_per_s,
+                    "tau_cpu_s": tau_cpu,
+                    "tau_batt_s": tau_batt,
+                    "leak_temp_mix_cpu": float(leak_temp_mix_cpu),
+                }
+            )
+        else:
+            th = fit_thermal_1state(tmp)
+            t_hat = simulate_temperature_1state(tmp, th)
+            tmp["temp_cpu_hat_C"] = t_hat.to_numpy(dtype=float)
+            tmp["temp_batt_hat_C"] = np.nan
+            tmp["temp_leak_hat_C"] = tmp["temp_cpu_hat_C"].to_numpy(dtype=float)
+
+            tau = float(-1.0 / th.a_per_s) if th.a_per_s < 0 else float("inf")
+            thermal_rows.append(
+                {
+                    "run_name": run_name,
+                    "thermal_model": "1state",
+                    "t_amb_C": th.t_amb_C,
+                    "a_cpu_per_s": th.a_per_s,
+                    "b_cpu_C_per_J": th.b_C_per_J,
+                    "a_batt_per_s": np.nan,
+                    "b_couple_per_s": np.nan,
+                    "tau_cpu_s": tau,
+                    "tau_batt_s": np.nan,
+                    "leak_temp_mix_cpu": np.nan,
+                }
+            )
+
+        t_hat_all.append(tmp)
 
     df2 = pd.concat(t_hat_all, ignore_index=True)
     thermal_df = pd.DataFrame(thermal_rows).sort_values("run_name")
 
     # Leak feature from simulated temp (structured: leak doubles ~ every 10C by default)
-    t_ref = float(np.nanmedian(df2["temp_cpu_hat_C"].to_numpy(dtype=float)))
-    leak_feat = np.exp(leak_gamma_per_C * (df2["temp_cpu_hat_C"].to_numpy(dtype=float) - t_ref))
+    t_ref = float(np.nanmedian(df2["temp_leak_hat_C"].to_numpy(dtype=float)))
+    leak_feat = np.exp(leak_gamma_per_C * (df2["temp_leak_hat_C"].to_numpy(dtype=float) - t_ref))
 
     # Fit base on the dominant operating point (GPS ON + cellular ON).
     # Then apply calibrated offsets only when a subsystem is turned OFF.
@@ -322,7 +536,7 @@ def simulate_soc(df_run: pd.DataFrame, c_eff_mAh: float) -> pd.DataFrame:
     return df
 
 
-def validate(df_all: pd.DataFrame, out_dir: Path, c_eff_mAh: float) -> pd.DataFrame:
+def validate(df_all: pd.DataFrame, out_dir: Path, c_eff_mAh: float, *, suffix: str = "") -> pd.DataFrame:
     rows = []
     for run_name, g in df_all.groupby("run_name"):
         sim = simulate_soc(g, c_eff_mAh=c_eff_mAh)
@@ -355,7 +569,7 @@ def validate(df_all: pd.DataFrame, out_dir: Path, c_eff_mAh: float) -> pd.DataFr
         )
 
     val = pd.DataFrame(rows).sort_values("run_name")
-    val.to_csv(out_dir / "model_validation_v2.csv", index=False, encoding="utf-8")
+    val.to_csv(out_dir / f"model_validation_v2{suffix}.csv", index=False, encoding="utf-8")
 
     # Plot measured vs predicted mean power per run
     import matplotlib
@@ -376,13 +590,13 @@ def validate(df_all: pd.DataFrame, out_dir: Path, c_eff_mAh: float) -> pd.DataFr
         ax.set_title("Power model validation v2 (per-run mean)")
         ax.grid(True, alpha=0.3)
         fig.tight_layout()
-        fig.savefig(out_dir / "model_validation_v2.png", dpi=150)
+        fig.savefig(out_dir / f"model_validation_v2{suffix}.png", dpi=150)
 
     return val
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="v2: 1-state thermal model + structured leak + GPS A/B calibration")
+    ap = argparse.ArgumentParser(description="v2: thermal model (1/2-state) + structured leak + GPS A/B calibration")
     ap.add_argument(
         "--input",
         type=Path,
@@ -413,6 +627,18 @@ def main() -> int:
         default=10.0,
         help="Leakage doubles every N degrees C (Arrhenius-inspired prior)",
     )
+    ap.add_argument(
+        "--thermal-model",
+        choices=["1state", "2state"],
+        default="1state",
+        help="Thermal model used to generate temperature for leakage feature.",
+    )
+    ap.add_argument(
+        "--leak-temp-mix-cpu",
+        type=float,
+        default=0.7,
+        help="For 2state: leak_temp = mix*cpu_hat + (1-mix)*batt_hat (0..1).",
+    )
 
     args = ap.parse_args()
 
@@ -420,17 +646,25 @@ def main() -> int:
 
     leak_gamma = math.log(2.0) / float(args.leak_doubling_C)
 
-    params, df_pred, thermal_df = fit_power_model_v2(all_df, alpha=float(args.alpha), leak_gamma_per_C=leak_gamma)
+    params, df_pred, thermal_df = fit_power_model_v2(
+        all_df,
+        alpha=float(args.alpha),
+        leak_gamma_per_C=leak_gamma,
+        thermal_model=str(args.thermal_model),
+        leak_temp_mix_cpu=float(args.leak_temp_mix_cpu),
+    )
     params.c_eff_mAh = float(args.c_eff_mAh)
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
 
-    (args.out_dir / "model_params_v2.json").write_text(
+    suffix = "" if str(args.thermal_model) == "1state" else f"_{str(args.thermal_model)}"
+
+    (args.out_dir / f"model_params_v2{suffix}.json").write_text(
         json.dumps(asdict(params), ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
-    thermal_df.to_csv(args.out_dir / "thermal_fit_v2.csv", index=False, encoding="utf-8")
+    thermal_df.to_csv(args.out_dir / f"thermal_fit_v2{suffix}.csv", index=False, encoding="utf-8")
 
-    validate(df_pred, out_dir=args.out_dir, c_eff_mAh=params.c_eff_mAh)
+    validate(df_pred, out_dir=args.out_dir, c_eff_mAh=params.c_eff_mAh, suffix=suffix)
 
     # Save a thin per-sample dump for debugging A/B and thermal
     keep_cols = [
@@ -439,8 +673,11 @@ def main() -> int:
         "dt_s",
         "soc_pct",
         "voltage_mV",
+        "temperature_C",
         "temperature_cpu_C",
         "temp_cpu_hat_C",
+        "temp_batt_hat_C",
+        "temp_leak_hat_C",
         "power_total_mW",
         "power_cpu_mW",
         "power_screen_mW",
@@ -453,13 +690,14 @@ def main() -> int:
         "cell_fit_source",
     ]
     cols = [c for c in keep_cols if c in df_pred.columns]
-    df_pred[cols].to_csv(args.out_dir / "model_samples_v2.csv", index=False, encoding="utf-8")
+    df_pred[cols].to_csv(args.out_dir / f"model_samples_v2{suffix}.csv", index=False, encoding="utf-8")
 
-    print(f"Wrote: {args.out_dir / 'model_params_v2.json'}")
-    print(f"Wrote: {args.out_dir / 'thermal_fit_v2.csv'}")
-    print(f"Wrote: {args.out_dir / 'model_validation_v2.csv'}")
-    print(f"Wrote: {args.out_dir / 'model_validation_v2.png'}")
-    print(f"Wrote: {args.out_dir / 'model_samples_v2.csv'}")
+    print(f"Thermal model: {args.thermal_model}")
+    print(f"Wrote: {args.out_dir / f'model_params_v2{suffix}.json'}")
+    print(f"Wrote: {args.out_dir / f'thermal_fit_v2{suffix}.csv'}")
+    print(f"Wrote: {args.out_dir / f'model_samples_v2{suffix}.csv'}")
+    print(f"Wrote: {args.out_dir / f'model_validation_v2{suffix}.csv'}")
+    print(f"Wrote: {args.out_dir / f'model_validation_v2{suffix}.png'}")
 
     return 0
 

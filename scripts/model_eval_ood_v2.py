@@ -17,8 +17,10 @@ from model_battery_soc_v2_thermal1 import (  # noqa: E402
     ModelParamsV2,
     fit_power_model_v2,
     fit_thermal_1state,
+    fit_thermal_2state,
     simulate_soc,
     simulate_temperature_1state,
+    simulate_temperature_2state,
 )
 
 
@@ -27,24 +29,47 @@ def _col_num(df: pd.DataFrame, col: str, default: float = 0.0) -> pd.Series:
     return pd.to_numeric(s, errors="coerce")
 
 
-def predict_power_v2(df_all: pd.DataFrame, params: ModelParamsV2) -> pd.DataFrame:
+def predict_power_v2(
+    df_all: pd.DataFrame,
+    params: ModelParamsV2,
+    *,
+    thermal_model: str = "1state",
+    leak_temp_mix_cpu: float = 0.7,
+) -> pd.DataFrame:
     df = df_all.copy()
     df["power_screen_mW"] = _col_num(df, "power_screen_mW", default=0.0).fillna(0.0)
     df["power_cpu_mW"] = _col_num(df, "power_cpu_mW", default=0.0).fillna(0.0)
     df["is_gps_on"] = _col_num(df, "is_gps_on", default=0.0).fillna(0.0)
     df["cellular_on"] = _col_num(df, "cellular_on", default=1.0).fillna(1.0)
 
-    # Per-run thermal fit + simulate temperature (uses observed temp/cpu power; allowed at test time)
+    thermal_model = str(thermal_model or "1state").strip().lower()
+    if thermal_model not in {"1state", "2state"}:
+        thermal_model = "1state"
+
+    # Per-run thermal fit + simulate temperature (uses observed temps/cpu power; allowed at test time)
     out_rows: list[pd.DataFrame] = []
     for run_name, g in df.groupby("run_name"):
         g = g.sort_values("t_s")
-        th = fit_thermal_1state(g)
-        t_hat = simulate_temperature_1state(g, th)
 
         tmp = g.copy().reset_index(drop=True)
-        tmp["temp_cpu_hat_C"] = t_hat.to_numpy(dtype=float)
+        if thermal_model == "2state":
+            th2 = fit_thermal_2state(tmp)
+            t_cpu_hat, t_batt_hat, t_leak_hat = simulate_temperature_2state(
+                tmp,
+                th2,
+                leak_temp_mix_cpu=float(leak_temp_mix_cpu),
+            )
+            tmp["temp_cpu_hat_C"] = t_cpu_hat.to_numpy(dtype=float)
+            tmp["temp_batt_hat_C"] = t_batt_hat.to_numpy(dtype=float)
+            tmp["temp_leak_hat_C"] = t_leak_hat.to_numpy(dtype=float)
+        else:
+            th = fit_thermal_1state(tmp)
+            t_hat = simulate_temperature_1state(tmp, th)
+            tmp["temp_cpu_hat_C"] = t_hat.to_numpy(dtype=float)
+            tmp["temp_batt_hat_C"] = np.nan
+            tmp["temp_leak_hat_C"] = tmp["temp_cpu_hat_C"].to_numpy(dtype=float)
 
-        leak_feat = np.exp(params.leak_gamma_per_C * (tmp["temp_cpu_hat_C"].to_numpy(dtype=float) - params.leak_tref_C))
+        leak_feat = np.exp(params.leak_gamma_per_C * (tmp["temp_leak_hat_C"].to_numpy(dtype=float) - params.leak_tref_C))
         p0 = (
             params.p_base_mW
             + params.k_screen * tmp["power_screen_mW"].to_numpy(dtype=float)
@@ -109,16 +134,30 @@ def eval_split(
     alpha: float,
     leak_doubling_C: float,
     c_eff_mAh: float,
+    *,
+    thermal_model: str,
+    leak_temp_mix_cpu: float,
 ) -> tuple[dict, pd.DataFrame]:
     train_df = all_df.loc[train_mask].copy()
     test_df = all_df.loc[~train_mask].copy()
 
     # Fit params on train
     leak_gamma = float(np.log(2.0) / leak_doubling_C)
-    params, _, _ = fit_power_model_v2(train_df, alpha=alpha, leak_gamma_per_C=leak_gamma)
+    params, _, _ = fit_power_model_v2(
+        train_df,
+        alpha=alpha,
+        leak_gamma_per_C=leak_gamma,
+        thermal_model=str(thermal_model),
+        leak_temp_mix_cpu=float(leak_temp_mix_cpu),
+    )
 
     # Predict on test
-    pred = predict_power_v2(test_df, params)
+    pred = predict_power_v2(
+        test_df,
+        params,
+        thermal_model=str(thermal_model),
+        leak_temp_mix_cpu=float(leak_temp_mix_cpu),
+    )
 
     # Per-sample MAE
     p_meas = _col_num(pred, "power_total_mW", default=np.nan)
@@ -165,6 +204,18 @@ def main() -> int:
     ap.add_argument("--leak-doubling-C", type=float, default=10.0)
     ap.add_argument("--c-eff-mAh", type=float, default=4410.0)
     ap.add_argument(
+        "--thermal-model",
+        choices=["1state", "2state"],
+        default="1state",
+        help="Thermal model used for both fitting and evaluation.",
+    )
+    ap.add_argument(
+        "--leak-temp-mix-cpu",
+        type=float,
+        default=0.7,
+        help="For 2state: leak_temp = mix*cpu_hat + (1-mix)*batt_hat (0..1).",
+    )
+    ap.add_argument(
         "--eval",
         choices=["s2-holdout", "looro", "loso", "all"],
         default="s2-holdout",
@@ -206,6 +257,8 @@ def main() -> int:
                 alpha=float(args.alpha),
                 leak_doubling_C=float(args.leak_doubling_C),
                 c_eff_mAh=float(args.c_eff_mAh),
+                thermal_model=str(args.thermal_model),
+                leak_temp_mix_cpu=float(args.leak_temp_mix_cpu),
             )
             summaries.append(summary)
             all_run_metrics.append(run_metrics)
@@ -221,6 +274,8 @@ def main() -> int:
                 alpha=float(args.alpha),
                 leak_doubling_C=float(args.leak_doubling_C),
                 c_eff_mAh=float(args.c_eff_mAh),
+                thermal_model=str(args.thermal_model),
+                leak_temp_mix_cpu=float(args.leak_temp_mix_cpu),
             )
             summaries.append(summary)
             all_run_metrics.append(run_metrics)
@@ -236,6 +291,8 @@ def main() -> int:
                 alpha=float(args.alpha),
                 leak_doubling_C=float(args.leak_doubling_C),
                 c_eff_mAh=float(args.c_eff_mAh),
+                thermal_model=str(args.thermal_model),
+                leak_temp_mix_cpu=float(args.leak_temp_mix_cpu),
             )
             summaries.append(summary)
             all_run_metrics.append(run_metrics)
@@ -243,11 +300,16 @@ def main() -> int:
     out_dir = args.out_dir
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    pd.DataFrame(summaries).to_csv(out_dir / "eval_summary_v2.csv", index=False, encoding="utf-8")
-    pd.concat(all_run_metrics, ignore_index=True).to_csv(out_dir / "eval_run_metrics_v2.csv", index=False, encoding="utf-8")
+    suffix = "" if str(args.thermal_model) == "1state" else f"_{str(args.thermal_model)}"
+    out_summary = out_dir / f"eval_summary_v2{suffix}.csv"
+    out_runs = out_dir / f"eval_run_metrics_v2{suffix}.csv"
 
-    print(f"Wrote: {out_dir / 'eval_summary_v2.csv'}")
-    print(f"Wrote: {out_dir / 'eval_run_metrics_v2.csv'}")
+    pd.DataFrame(summaries).to_csv(out_summary, index=False, encoding="utf-8")
+    pd.concat(all_run_metrics, ignore_index=True).to_csv(out_runs, index=False, encoding="utf-8")
+
+    print(f"Thermal model: {args.thermal_model}")
+    print(f"Wrote: {out_summary}")
+    print(f"Wrote: {out_runs}")
     return 0
 
 

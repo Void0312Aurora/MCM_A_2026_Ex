@@ -50,6 +50,22 @@ def main() -> int:
         help="Optional output file path (e.g., artifacts/run_plan_v2.ps1)",
     )
     ap.add_argument(
+        "--only-plan-id",
+        default=None,
+        help=(
+            "Optional filter: only emit rows whose plan_id matches one of these (comma-separated). "
+            "Example: --only-plan-id S3-GRAD"
+        ),
+    )
+    ap.add_argument(
+        "--only-scenario-prefix",
+        default=None,
+        help=(
+            "Optional filter: only emit rows whose scenario starts with this prefix. "
+            "Example: --only-scenario-prefix S3_"
+        ),
+    )
+    ap.add_argument(
         "--encoding",
         default="utf-8-sig",
         help="Encoding for --out file (default: utf-8-sig for Windows PowerShell compatibility)",
@@ -58,10 +74,24 @@ def main() -> int:
 
     df = pd.read_csv(args.plan, encoding="utf-8-sig")
 
+    only_plan_ids: set[str] | None = None
+    if args.only_plan_id is not None and str(args.only_plan_id).strip() != "":
+        only_plan_ids = {p.strip() for p in str(args.only_plan_id).split(",") if p.strip()}
+
+    scenario_prefix = None
+    if args.only_scenario_prefix is not None and str(args.only_scenario_prefix).strip() != "":
+        scenario_prefix = str(args.only_scenario_prefix).strip()
+
     cmds: list[str] = []
     for _, row in df.iterrows():
         scenario = str(row.get("scenario", "")).strip()
         if not scenario:
+            continue
+
+        plan_id = str(row.get("plan_id", "")).strip()
+        if only_plan_ids is not None and plan_id not in only_plan_ids:
+            continue
+        if scenario_prefix is not None and not scenario.startswith(scenario_prefix):
             continue
 
         repeat = int(row.get("repeat", 1) or 1)
@@ -74,10 +104,10 @@ def main() -> int:
 
         set_brightness = row.get("set_brightness", None)
         cpu_threads = row.get("cpu_load_threads", None)
+        cpu_load_best_effort = _flag(row.get("cpu_load_best_effort", 0))
         screen_before = _screen_mode(row.get("screen_before", None))
         auto_reset_settings = _flag(row.get("auto_reset_settings", 0))
 
-        plan_id = str(row.get("plan_id", "")).strip()
         notes = str(row.get("notes", "")).strip()
 
         for i in range(repeat):
@@ -113,6 +143,8 @@ def main() -> int:
                 threads = int(float(cpu_threads))
                 if threads > 0:
                     parts.append(f"--cpu-load-threads {threads}")
+                    if cpu_load_best_effort:
+                        parts.append("--cpu-load-best-effort")
 
             cmd = " ".join(parts)
             if repeat > 1:
